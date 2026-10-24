@@ -23,11 +23,12 @@ from .chat_history_store import ChatHistoryStore,scope_id
 from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
 from .group_permission_compat import GroupPermissionAdapter
 from .conversation_context import dialogue_snapshot,attach_dialogue_context
+from .tool_response_contract import restore_tool_response_contract
 from .model_logging import ModelActivityLogger,event_trace,model_operation,count_image_parts
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -224,6 +225,18 @@ class PersonaModelBindings(Star):
         if payload.get('image_followup_only'):
             from .image_followup_checks import verify_image_followup
             return jsonify({'status':'ok','data':await verify_image_followup()})
+        if payload.get('tool_prompt_audit_only'):
+            from tempfile import TemporaryDirectory
+            from .integration_checks import verify_native_meme_request
+            probe=object.__new__(type(self));probe.context=self.context;probe.config=json.loads(json.dumps(dict(self.config)))
+            probe.config['conversation_context']={'enabled':False}
+            probe.config['history_recall']={'enabled':False}
+            probe.router=ReplyRouter({**self.router.settings,'image_context_enabled':False},self.judge_reply)
+            probe.chat_history_store=None;probe.audit_tool_prompt=True
+            with TemporaryDirectory(dir=self.cache_path.parent,prefix='tool-prompt-audit-') as directory:
+                probe.cache_path=Path(directory)/'reply_context.json'
+                report=await verify_native_meme_request(self.context,probe,False,'本轮仅检查工具回复规则，不执行任何任务。',True)
+                return jsonify({'status':'ok','data':{key:report.get(key) for key in ('native_tool_contract_before_hooks','native_tool_contract_after_hooks','tool_contract_stages','private_tool_prompt_written','qq_messages_sent','model')}})
         if payload.get('image_followup_model_only'):
             from tempfile import TemporaryDirectory
             from .integration_checks import verify_native_meme_request
@@ -522,6 +535,10 @@ class PersonaModelBindings(Star):
             namespace=isolation._scope(decision)[0] if isolation and decision else event.unified_msg_origin
             if snapshot['scope']==namespace+'|'+self.routing_persona(event):
                 attach_dialogue_context(event,request,snapshot['rows'],snapshot.get('current_speaker'))
+        # Persona replacement may consume the native tool prompt at the tail
+        # of its section. Restore it after every request customization.
+        from astrbot.core.astr_main_agent_resources import TOOL_CALL_PROMPT
+        restore_tool_response_contract(request,TOOL_CALL_PROMPT)
         self.router.note_ai(group,"", request=event.get_message_str(),sender=str(event.get_sender_id()),pending=True)
         self.save_context()
         activity=getattr(self,'model_activity',None)

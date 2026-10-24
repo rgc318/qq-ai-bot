@@ -16,7 +16,7 @@ config=copy.deepcopy(before)
 config['reply_conditions'].update(dialogue_continuity_enabled=True,dialogue_continuity_window_seconds=600)
 api.call('/api/v1/plugins/'+name+'/config',{'config':config},method='PUT',timeout=120)
 plugin=next(row for row in api.call('/api/v1/plugins')['data'] if row['name']==name)
-assert plugin['activated'] and plugin['version']=='1.7.0', 'New plugin must be loaded'
+assert plugin['activated'] and plugin['version'].startswith('1.7.'), 'Continuity-capable plugin must be loaded'
 bindings=api.call('/api/plug/qq_persona_models/verify')['data']
 assert all(row['passed'] for row in bindings)
 after=api.call('/api/v1/plugins/'+name+'/config')['data']['config']

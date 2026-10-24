@@ -204,7 +204,7 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
             await handler(event,*args)
             if args and hasattr(args[0],'system_prompt'):
                 req=args[0]
-                stages.append({'handler':h.handler_full_name,'seconds':round(time.monotonic()-hook_started,3),'meme_prompt':'<!-- meme_manager_prompt:start -->' in (req.system_prompt or ''),'stock_policy':'本次现成表情请求' in (req.system_prompt or ''),'tool_names':req.func_tool.names() if req.func_tool else [],'history_messages':len(req.contexts or [])})
+                stages.append({'handler':h.handler_full_name,'seconds':round(time.monotonic()-hook_started,3),'meme_prompt':'<!-- meme_manager_prompt:start -->' in (req.system_prompt or ''),'stock_policy':'本次现成表情请求' in (req.system_prompt or ''),'native_tool_contract':'never return an empty response' in (req.system_prompt or '') or 'You MUST NOT return an empty response' in (req.system_prompt or ''),'tool_names':req.func_tool.names() if req.func_tool else [],'history_messages':len(req.contexts or [])})
             if event.is_stopped():raise RuntimeError('Diagnostic event stopped by '+h.handler_full_name)
     await hooks(EventType.OnWaitingLLMRequestEvent)
     stage=InternalAgentSubStage()
@@ -212,6 +212,9 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
     result=await build_main_agent(event=event,plugin_context=context,config=replace(stage.main_agent_cfg,streaming_response=False),apply_reset=False,prepared_images={})
     if result is None:raise RuntimeError('Native builder did not create a request')
     req=result.provider_request
+    def has_tool_contract(text):
+        return 'never return an empty response' in (text or '') or 'You MUST NOT return an empty response' in (text or '')
+    original_tool_contract=has_tool_contract(req.system_prompt)
     try:
         await hooks(EventType.OnLLMRequestEvent,req)
         await result.reset_coro
@@ -221,6 +224,16 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
     runner=result.agent_runner
     report={'stages':stages,'live_anchor_present':had_anchor,'old_anchor_injected':bool(event.get_extra('qq_semantic_reference_attached')),'history_messages':len(req.contexts or []),'history_tool_calls':sum(bool(x.get('tool_calls')) for x in req.contexts or []),'model':result.provider.get_model(),'final_meme_prompt':'<!-- meme_manager_prompt:start -->' in (req.system_prompt or ''),'final_stock_policy':'本次现成表情请求' in (req.system_prompt or ''),'generation_tools_absent':not {'generate_image','generate_selfie','generate_video'}.intersection(req.func_tool.names() if req.func_tool else []),'qq_messages_sent':0,'context_followup_reason':(event.get_extra('qq_semantic_decision') or {}).get('reason'),'image_reference_recovered':bool(event.get_extra('qq_image_followup_reference')) and bool(getattr(req,'image_urls',None))}
     report['performance']=event.get_extra('qq_performance')
+    report['native_tool_contract_before_hooks']=original_tool_contract
+    report['native_tool_contract_after_hooks']=has_tool_contract(req.system_prompt)
+    report['tool_contract_stages']=[{'handler':stage['handler'],'native_tool_contract':stage['native_tool_contract']} for stage in stages]
+    if getattr(probe,'audit_tool_prompt',False):
+        from pathlib import Path
+        # Explicit diagnostic mode only. Keep prompt/schema inside the container;
+        # never return them through HTTP or include conversation history here.
+        data={'system_prompt':req.system_prompt,'tools':req.func_tool.get_func_desc_openai_style() if req.func_tool else []}
+        Path('/AstrBot/data/temp/native-tool-prompt-private.json').write_text(__import__('json').dumps(data,ensure_ascii=False),encoding='utf-8')
+        report['private_tool_prompt_written']=True
     if probe.router.context(group).image_turn:
         report['prior_image_status']=probe.router.context(group).image_turn['status']
         report['prior_reference_count']=probe.router.context(group).image_turn['reference_count']
