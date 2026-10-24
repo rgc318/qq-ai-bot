@@ -22,9 +22,10 @@ from .image_upload_compat import ImageUploadAdapter
 from .chat_history_store import ChatHistoryStore,scope_id
 from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
 from .group_permission_compat import GroupPermissionAdapter
+from .conversation_context import dialogue_snapshot,attach_dialogue_context
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.3.4")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.4.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -211,6 +212,9 @@ class PersonaModelBindings(Star):
         if payload.get('group_permissions_only'):
             from .group_permission_checks import verify_group_permissions
             return jsonify({'status':'ok','data':await verify_group_permissions(self)})
+        if payload.get('dialogue_cases_only'):
+            from .dialogue_checks import verify_dialogue_cases
+            return jsonify({'status':'ok','data':await verify_dialogue_cases(self,bool(payload.get('call_model')),payload.get('cases'))})
         if payload.get('quote_image_inspect'):
             from .image_quote_checks import inspect_quoted_image
             return jsonify({'status':'ok','data':await inspect_quoted_image(self,payload)})
@@ -381,10 +385,15 @@ class PersonaModelBindings(Star):
             if ctx.last_ai:
                 event.set_extra('qq_semantic_reference',ctx.last_ai)
         verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
+        event.set_extra('qq_semantic_decision',verdict)
+        settings=self.config.get('conversation_context',{})
+        if settings.get('enabled',True):
+            snapshot=dialogue_snapshot(list(ctx.messages),getattr(event.message_obj,'message_id',''),self.router.clock(),settings.get('messages',12),settings.get('chars',2400))
+            event.set_extra('qq_dialogue_snapshot',{'scope':scope,'rows':snapshot,'current_speaker':{'speaker_id':str(event.get_sender_id()),'name':event.get_sender_name()[:60]}})
         self.save_context()
         skipped=skip_second_judge(self.context,event,verdict,self.router.settings.get('single_judge',True))
         label='QQ回复诊断' if getattr(self,'cache_path',None) is None else 'QQ回复条件'
-        logger.info('[%s] group=%s message=%s route=%s reason=%s context=%s judge_seconds=%s second_judge_skipped=%s',label,group,str(getattr(event.message_obj,'message_id','')),verdict['route'],verdict['reason'],bool(ctx.last_ai),verdict.get('judge_seconds',0),skipped)
+        logger.info('[%s] group=%s message=%s route=%s reason=%s recipient=%s context=%s judge_seconds=%s second_judge_skipped=%s',label,group,str(getattr(event.message_obj,'message_id','')),verdict['route'],verdict['reason'],verdict.get('recipient','unknown'),bool(ctx.last_ai),verdict.get('judge_seconds',0),skipped)
         if verdict["route"] == "duplicate":
             event.stop_event()
             return
@@ -423,6 +432,14 @@ class PersonaModelBindings(Star):
             request.system_prompt=(request.system_prompt or '')+'\n[图片任务开工对白]\n调用 generate_image 或 generate_selfie 时，必须在同一次工具参数里填写 pending_message：用当前人格结合本次要求，自然回应一句你准备怎么画或怎么改。不要复用固定报到句，不要把改图一概称为拍照，不说已经完成，不承诺用时。程序会在生图开始前发送这句话；不必为这句开工对白另调 send_message_to_user。绘图描述仍放在 prompt/action 等原参数中，不能用 pending_message 替代。\n'
         self.attach_history_catalog(event,request)
         apply_quote_image_policy(event,request)
+        snapshot=event.get_extra('qq_dialogue_snapshot')
+        if self.config.get('conversation_context',{}).get('enabled',True) and snapshot:
+            decision=event.get_extra('user_policy_decision')
+            policy=self.context.get_registered_star('astrbot_plugin_user_policy')
+            isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
+            namespace=isolation._scope(decision)[0] if isolation and decision else event.unified_msg_origin
+            if snapshot['scope']==namespace+'|'+self.routing_persona(event):
+                attach_dialogue_context(event,request,snapshot['rows'],snapshot.get('current_speaker'))
         self.router.note_ai(group,"", request=event.get_message_str(),sender=str(event.get_sender_id()),pending=True)
         self.save_context()
 
@@ -512,7 +529,11 @@ class PersonaModelBindings(Star):
         from astrbot.core.star.star import star_map
         probe = object.__new__(type(self))
         probe.context, probe.config = self.context, self.config
-        probe.router = ReplyRouter(dict(self.router.settings), self.judge_reply)
+        # Test native callback behavior independently of remote availability.
+        # Real classifier/persona calls have separate dialogue scenario probes.
+        async def fixture_followup(payload):
+            return {'recipient':'bot','silence_requested':False,'route':'followup','confidence':0.99,'anchor_id':payload['last_ai_activity']['id']}
+        probe.router = ReplyRouter(dict(self.router.settings), fixture_followup)
         group = next(iter(probe.router.settings.get("allowed_groups", [])), "")
         if not group:
             return jsonify({"status":"error","message":"No allowed test group configured"})
@@ -590,7 +611,7 @@ class PersonaModelBindings(Star):
             checks['single_judge_'+name]=negative.get_extra('qq_single_judge_complete') and not scheduler_calls and not negative.is_at_or_wake_command and not negative.is_stopped()
         ordinary=SimulatedEvent('ordinary','今晚真热闹')
         checks['unclassified_ambient_keeps_selfreply']=not skip_second_judge(self.context,ordinary,{'route':'ambient','judged':False}) and not ordinary.get_extra('qq_single_judge_complete')
-        return jsonify({"status":"ok","data":{"checks":checks,"passed":all(checks.values()),"qq_messages_sent":0}})
+        return jsonify({"status":"ok","data":{"checks":checks,"passed":all(checks.values()),"qq_messages_sent":0,"model_calls":0,"judge_mode":"fixture"}})
 
     def bind(self, event):
         decision = event.get_extra("user_policy_decision")

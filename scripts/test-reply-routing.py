@@ -74,6 +74,58 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['route'],'ambient')
         self.assertEqual(len(self.calls),1)
 
+    async def test_bot_recipient_without_task_still_gets_response(self):
+        self.router.settings['aliases']=['ChatGPT']
+        await self.router.decide('group','A','ChatGPT大人')
+        self.now+=3
+        self.verdict={'route':'ambient','recipient':'bot','silence_requested':False,'confidence':0.98,'reason':'是在叫AI但没有具体任务'}
+        result=await self.router.decide('group','A','wake up')
+        self.assertEqual(result['route'],'fast')
+        self.assertEqual(result['reason'],'semantic_addressed')
+        self.assertTrue(self.calls[-1]['recent_addressing_evidence'])
+        self.assertTrue(self.router.context('group').messages[-1]['directed_to_bot'])
+
+    async def test_partial_cross_member_conversation_is_available_to_judge(self):
+        self.router.settings['aliases']=['龙娘']
+        await self.router.decide('group','A','龙娘')
+        self.now+=3
+        self.verdict={'route':'addressed','recipient':'bot','silence_requested':False,'confidence':0.98}
+        await self.router.decide('group','A','我们周日活动想找地方',name='甲')
+        await self.router.decide('group','B','我只能下午去',name='乙')
+        result=await self.router.decide('group','C','也算我一个，帮我们一起安排',name='丙')
+        self.assertEqual(result['route'],'fast')
+        rows=self.calls[-1]['recent_messages']
+        self.assertEqual({row['sender'] for row in rows if row['role']=='user'},{'A','B','C'})
+        self.assertIn('我们周日活动想找地方',[row['text'] for row in rows])
+
+    async def test_explicit_silence_and_human_recipient_override_route(self):
+        for extra in ({'recipient':'human','silence_requested':False},{'recipient':'bot','silence_requested':True}):
+            self.verdict={'route':'addressed','confidence':0.99,**extra}
+            self.assertEqual((await self.router.decide('group','A','小鱼先别回答'))['route'],'ambient')
+
+    async def test_answer_to_ai_question_is_not_discarded_as_ack(self):
+        self.router.note_ai('group','按周日下午安排可以吗？',sender='A')
+        self.verdict={'route':'addressed','recipient':'bot','silence_requested':False,'confidence':0.99}
+        result=await self.router.decide('group','A','好的')
+        self.assertEqual(result['route'],'fast')
+        self.assertTrue(self.calls)
+
+    async def test_another_member_can_answer_ai_group_question(self):
+        self.router.note_ai('group','大家周日下午去图书馆可以吗？',sender='A')
+        self.verdict={'route':'addressed','recipient':'bot','silence_requested':False,'confidence':0.99}
+        result=await self.router.decide('group','B','好的')
+        self.assertEqual(result['route'],'fast')
+        self.assertTrue(self.calls)
+
+    async def test_snapshot_restores_early_conversation_without_ai_answer(self):
+        await self.router.decide('group','A','小鱼姐姐')
+        saved=self.router.snapshot(wall_time=10000)
+        restored=module.ReplyRouter(self.router.settings,self.router.judge,clock=lambda:5000)
+        restored.restore(saved,wall_time=10003)
+        self.assertIsNone(restored.context('group').last_ai)
+        self.assertEqual(restored.context('group').messages[-1]['text'],'小鱼姐姐')
+        self.assertEqual(5000-restored.context('group').messages[-1]['time'],3)
+
     async def test_standalone_meme_request_can_be_judged_without_anchor(self):
         self.verdict={'route':'addressed','confidence':0.96}
         result=await self.router.decide('group','A','发个开心的表情包')
