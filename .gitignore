@@ -1,0 +1,21 @@
+# 应用、运行数据与下载包
+/apps/
+/downloads/
+/backups/
+/logs/
+/secrets/
+
+# 本地部署记录与凭据
+/config/*.local.json
+.env
+.env.*
+!.env.example
+*.log
+*.key
+*.pem
+
+# Python 缓存与本地虚拟环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/

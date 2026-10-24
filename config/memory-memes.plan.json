@@ -1,0 +1,35 @@
+{
+  "status": "installed_configured_and_verified",
+  "plugins": [
+    {"id": "astrbot_plugin_livingmemory", "repository": "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory", "tag": "2.7.1"},
+    {"id": "meme_manager", "repository": "https://github.com/anka-afk/astrbot_plugin_meme_manager", "tag": "v5.2.5"}
+  ],
+  "providers": {
+    "embedding": {"id": "qq-memory-embedding", "model": "siliconflow/Qwen/Qwen3-Embedding-0.6B", "dimensions": 1024, "api_base": "http://192.168.31.229:4000/v1", "key_source": "existing_local_secret"},
+    "summary": {"id": "qq-memory-summary", "model": "siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017", "enable_thinking": false, "max_tokens": 4096}
+  },
+  "livingmemory": {
+    "bot_language": "zh",
+    "access_control": {"whitelist_enabled": true, "allowed_ids": "347440128"},
+    "provider_settings": {"embedding_provider_id": "qq-memory-embedding", "llm_provider_id": "qq-memory-summary", "llm_stream_mode": "auto"},
+    "session_manager": {"enable_full_group_capture": true, "max_sessions": 20, "context_window_size": 50, "max_messages_per_session": 500},
+    "filtering_settings": {"use_persona_filtering": true, "use_session_filtering": true, "memory_scope_mode": "legacy"},
+    "reflection_engine": {"summary_trigger_rounds": 10, "include_source_time_tags": true},
+    "recall_engine": {"top_k": 0, "max_k": 8, "injection_method": "extra_user_content", "rerank_enabled": false},
+    "agent_tools": {"enable_recall_tool": true, "enable_memorize_tool": true, "enable_forget_tool": false, "enable_agentic_recall_beta": false},
+    "backup_settings": {"enabled": true, "keep_days": 7},
+    "forgetting_agent": {"auto_cleanup_enabled": true, "auto_archived_enabled": true}
+  },
+  "meme_manager": {
+    "semantic": {"enabled": false},
+    "auto_collect": {"enabled": false, "manual_review": true, "scope": ["group:347440128"]},
+    "generation": {
+      "trigger": {"scope": "chat_and_plugin_llm"},
+      "emotion": {"llm": {"enabled": false}, "max_memes_per_message": 1},
+      "prompt": {"quantity_guidance_enabled": true},
+      "message": {"send_image_as_base64": true, "streaming_compatibility": true}
+    },
+    "pack_policy": "local_attributed_subsets_from_maintainer_resources; whale_15_and_general_19; native_persona_pack_rules; no_cloud_sync"
+  },
+  "verification": ["native_embedding_dimension", "plugin_ready_and_model_selection", "synthetic_memory_write_recall_persona_and_group_isolation_then_cleanup", "pack_has_images_and_group_selection", "meme_markup_to_image_without_QQ_send", "existing_persona_models_and_reply_hooks"]
+}

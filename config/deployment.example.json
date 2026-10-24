@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "purpose": "deployment_inventory_only_not_application_config",
+  "deployment": {
+    "platform": "windows",
+    "topology": "same_host",
+    "usage": "personal_non_commercial"
+  },
+  "snowluma": {
+    "directory": "apps/snowluma",
+    "reference_version": "v2.1.1",
+    "installed_version": "",
+    "webui_url": "http://127.0.0.1:5099",
+    "qq_client_version": ""
+  },
+  "astrbot": {
+    "working_directory": "apps/astrbot",
+    "installed_version": "",
+    "webui_url": "http://127.0.0.1:6185",
+    "agent_runner": "builtin"
+  },
+  "onebot": {
+    "protocol": "v11",
+    "transport": "reverse_websocket",
+    "astrbot_bind_host": "127.0.0.1",
+    "astrbot_port": 6199,
+    "snowluma_connect_url": "ws://127.0.0.1:6199/ws",
+    "token_configured": false
+  },
+  "model_api": {
+    "provider_type": "",
+    "base_url": "",
+    "model_id": "",
+    "api_key_environment_variable": "QQ_BOT_API_KEY",
+    "supports_tool_calling": null,
+    "supports_image_input": null
+  },
+  "access": {
+    "bot_qq": "",
+    "owner_qq": "",
+    "allowed_private_users": [],
+    "allowed_groups": [],
+    "group_trigger": "mention_or_command"
+  }
+}

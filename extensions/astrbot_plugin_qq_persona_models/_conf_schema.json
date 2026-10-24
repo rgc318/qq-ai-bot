@@ -1,0 +1,37 @@
+{
+  "bindings": {"type":"dict","description":"人格 ID 到 AstrBot Provider ID 的映射","items":{},"default":{"大肥鱼":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017","ChatGPT龙娘":"qq-dragon-sol-low"}},
+  "history_recall":{"type":"object","description":"旧对话检索开关与话题摘录","items":{
+    "enabled":{"type":"bool","description":"启用旧对话检索（关闭可减少输入与查询等待；保存后生效，保留已有记录，长期记忆独立运行）","default":true},
+    "catalog_chars":{"type":"int","description":"随请求附带的话题摘录字符上限，不调用摘要模型，0为不附带","default":500}
+  }},
+  "image_upload_compat":{"type":"object","description":"参考图上传格式兼容","items":{
+    "enabled":{"type":"bool","description":"GIF参考图上传副本转为首帧PNG，原动图保留","default":true},
+    "provider_ids":{"type":"list","description":"需要GIF转PNG的绘图节点","default":["litellm-image25"]}
+  }},
+  "performance":{"type":"object","description":"近期上下文与延迟优化","items":{
+    "enabled":{"type":"bool","description":"启用有界近期上下文并归档被裁剪的原始记录","default":false},
+    "history_turns":{"type":"int","description":"保留最近用户对话轮数","default":12},
+    "history_image_turns":{"type":"int","description":"提及旧图片时可保留的近期图片轮数","default":2}
+  }},
+  "image_pending_notice":{"type":"object","description":"自然语言生图前提示","items":{
+    "enabled":{"type":"bool","description":"开始调用生图工具时先回复一句，每轮只发一次","default":true},
+    "model_generated":{"type":"bool","description":"当前主模型生成开工对白，优先同次调用，漏写时补一次短生成","default":true},
+    "fallback_timeout_seconds":{"type":"int","description":"漏写开工对白时短生成最多等待秒数，失败仍继续生图","default":10},
+    "draw_text":{"type":"text","description":"仅关闭模型对白时使用的绘图预设文案","default":"收到，我来画，出图后发给你～"},
+    "selfie_text":{"type":"text","description":"仅关闭模型对白时使用的自拍预设文案","default":"收到，我来拍一张，完成后发给你～"}
+  }},
+  "reply_conditions": {"type":"object","description":"语境追问快速回复","items":{
+    "enabled":{"type":"bool","description":"启用语义判断","default":true},
+    "allowed_groups":{"type":"list","description":"生效群号","default":["347440128"]},
+    "judge_provider_id":{"type":"string","description":"语义判断模型","default":"qq-reply-judge-fast","_special":"select_provider"},
+    "followup_window_seconds":{"type":"int","description":"AI 对话关联窗口（秒）","default":1800},
+    "judge_timeout_seconds":{"type":"int","description":"判断超时（秒）","default":8},
+    "judge_failure_backoff_seconds":{"type":"int","description":"判断失败后暂停语义判断秒数（明确 @ 不受影响）","default":15},
+    "single_judge":{"type":"bool","description":"本地语义判断完成后跳过业镜重复判断（适配业镜 1.5.1）","default":true},
+    "judge_recent_messages":{"type":"int","description":"判断阶段最多参考的近期群消息数","default":12},
+    "judge_recent_chars":{"type":"int","description":"判断阶段近期群消息总字符预算","default":3600},
+    "confidence_threshold":{"type":"float","description":"直接处理所需判断置信度","default":0.88},
+    "user_min_interval_seconds":{"type":"int","description":"同一用户重复追问最短间隔（秒）","default":2},
+    "aliases":{"type":"list","description":"用于理解点名的称呼，不限于消息开头","default":["ai助手","大肥鱼","肥鱼","小鱼","小鲸鱼","鲸鱼娘","龙娘","ChatGPT","GPT"]}
+  }}
+}
