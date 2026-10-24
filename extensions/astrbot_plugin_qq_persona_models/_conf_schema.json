@@ -1,5 +1,10 @@
 {
   "bindings": {"type":"dict","description":"人格 ID 到 AstrBot Provider ID 的映射","items":{},"default":{"大肥鱼":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017","ChatGPT龙娘":"qq-dragon-sol-low"}},
+  "model_logging":{"type":"object","description":"模型调用与消息处理日志","items":{
+    "enabled":{"type":"bool","description":"记录模型开始、等待、完成和异常，不打印提示词或密钥","default":true},
+    "heartbeat_seconds":{"type":"int","description":"模型仍未返回时首次等待日志的秒数","default":10},
+    "heartbeat_repeat_seconds":{"type":"int","description":"后续等待日志的间隔秒数","default":30}
+  }},
   "conversation_context":{"type":"object","description":"分段与多人对话理解","items":{
     "enabled":{"type":"bool","description":"生成回复时附带同群同人格的近期结构化发言快照，不增加模型调用","default":true},
     "messages":{"type":"int","description":"近期发言快照最多条数（最多24）","default":12},

@@ -177,6 +177,7 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
     msg.message=[Plain(text=msg.message_str)]
     msg.raw_message={}
     event=NoSendEvent(msg.message_str,msg,PlatformMetadata(name='aiocqhttp',description='isolated diagnostic',id='qq-snowluma'),group)
+    event.set_extra('qq_diagnostic',True)
     event.is_wake=True
     event.is_at_or_wake_command=direct
     policy=context.get_registered_star('astrbot_plugin_user_policy').star_cls

@@ -23,9 +23,10 @@ from .chat_history_store import ChatHistoryStore,scope_id
 from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
 from .group_permission_compat import GroupPermissionAdapter
 from .conversation_context import dialogue_snapshot,attach_dialogue_context
+from .model_logging import ModelActivityLogger,event_trace,model_operation,count_image_parts
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.4.1")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.5.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -34,6 +35,7 @@ class PersonaModelBindings(Star):
         self.image_upload_adapter=ImageUploadAdapter(dict(config.get('image_upload_compat',{})))
         self.image_quote_adapter=ImageQuoteAdapter(self.scoped_group)
         self.group_permission_adapter=GroupPermissionAdapter(lambda:self.router.settings.get('allowed_groups',[]))
+        self.model_activity=ModelActivityLogger(dict(config.get('model_logging',{})))
         self.chat_history_store=None
         self.history_job=None
         self.history_bootstrap={}
@@ -42,6 +44,7 @@ class PersonaModelBindings(Star):
         self.image_upload_adapter.install(self.context)
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
+        self.model_activity.install(self.context)
         self.cache_path=StarTools.get_data_dir('astrbot_plugin_qq_persona_models')/'reply_context.json'
         if self.cache_path.is_file():
             try:
@@ -58,16 +61,19 @@ class PersonaModelBindings(Star):
             self.start_history_bootstrap()
         self.context.register_web_api('/qq_persona_models/chat_history/status',self.chat_history_status,['GET'],'旧对话索引状态，仅返回计数')
         self.context.register_web_api('/qq_persona_models/chat_history/verify',self.verify_chat_history,['POST'],'隔离临时索引验证，不发送QQ消息')
+        self.context.register_web_api('/qq_persona_models/model_activity/status',self.model_activity_status,['GET'],'查看正在调用的模型和耗时，不返回聊天正文')
 
     @filter.on_plugin_loaded()
     async def refresh_image_upload_adapter(self,metadata):
         self.image_upload_adapter.install(self.context)
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
+        self.model_activity.install(self.context)
         if getattr(metadata,'name','')=='astrbot_plugin_user_policy':
             self.start_history_bootstrap()
 
     async def terminate(self):
+        self.model_activity.restore()
         self.image_upload_adapter.restore()
         self.image_quote_adapter.restore()
         self.group_permission_adapter.restore()
@@ -209,6 +215,9 @@ class PersonaModelBindings(Star):
     async def verify_memory_meme(self):
         from quart import jsonify, request
         payload=await request.get_json(silent=True) or {}
+        if payload.get('model_logging_only'):
+            from .model_logging_checks import verify_model_logging,verify_live_model_logging
+            return jsonify({'status':'ok','data':await verify_live_model_logging(self) if payload.get('call_model') else await verify_model_logging()})
         if payload.get('group_permissions_only'):
             from .group_permission_checks import verify_group_permissions
             return jsonify({'status':'ok','data':await verify_group_permissions(self)})
@@ -276,6 +285,8 @@ class PersonaModelBindings(Star):
     async def normalize_image_arguments(self,event: AstrMessageEvent,tool,tool_args):
         if self.scoped_group(event):
             normalize_chat_image_arguments(getattr(tool,'name',''),tool_args)
+            if getattr(tool,'name','') in ('generate_image','generate_selfie'):
+                event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
 
     @filter.on_using_llm_tool(priority=1100)
     async def announce_image_generation(self,event: AstrMessageEvent,tool,tool_args):
@@ -323,7 +334,8 @@ class PersonaModelBindings(Star):
             system=(getattr(persona,'system_prompt','') or '')+'\n当前只写图片任务开始前的一句简短自然对白，使用本人的性格和语气，贴合这次要求，避免固定报到话术。只输出一句中文，最多60字，不带引号和标记。不声称已经完成，不保证用时，不解释模型/工具，不调用工具。\n'
             prompt=json.dumps({'user_request':event.get_message_str()[:800],'task':'角色自拍' if tool_name=='generate_selfie' else '绘图或改图','image_description':str(args.get('prompt') or args.get('action') or '')[:1000]},ensure_ascii=False)
             event.set_extra('qq_notice_model_calls',1)
-            response=await asyncio.wait_for(provider.text_chat(prompt=prompt,system_prompt=system,contexts=[],func_tool=None),timeout=float(self.config.get('image_pending_notice',{}).get('fallback_timeout_seconds',10)))
+            with model_operation('image_notice',event_trace(event)):
+                response=await asyncio.wait_for(provider.text_chat(prompt=prompt,system_prompt=system,contexts=[],func_tool=None),timeout=float(self.config.get('image_pending_notice',{}).get('fallback_timeout_seconds',10)))
             text=' '.join((response.completion_text or '').split())
             return text if 0<len(text)<=160 else ''
         except Exception as exc:
@@ -385,7 +397,9 @@ class PersonaModelBindings(Star):
             event.set_extra('qq_mention_resumed',bool(previous))
             if ctx.last_ai:
                 event.set_extra('qq_semantic_reference',ctx.last_ai)
-        verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
+        trace=event_trace(event)
+        with model_operation('reply_judge',{**trace,'configured_timeout_seconds':self.router.settings.get('judge_timeout_seconds',8)}):
+            verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
         event.set_extra('qq_semantic_decision',verdict)
         settings=self.config.get('conversation_context',{})
         if settings.get('enabled',True):
@@ -399,6 +413,12 @@ class PersonaModelBindings(Star):
             event.stop_event()
             return
         self.apply_fast_verdict(event, verdict)
+        activity=getattr(self,'model_activity',None)
+        if activity:
+            provider=self.context.get_provider_by_id(self.router.settings.get('judge_provider_id'))
+            model=provider.get_model() if provider and verdict.get('judged') else 'not_called'
+            next_step='main_reply_pending' if event.is_at_or_wake_command else 'main_reply_not_started' if verdict.get('judged') else 'background_reply_path'
+            activity.emit('routing_done',**trace,model=model,route=verdict['route'],reason=verdict['reason'],seconds=verdict.get('judge_seconds',0),error_type=verdict.get('error_type'),next=next_step)
 
     @filter.on_llm_request(priority=-1200)
     async def attach_reference_and_track_request(self, event: AstrMessageEvent, request):
@@ -446,6 +466,18 @@ class PersonaModelBindings(Star):
                 attach_dialogue_context(event,request,snapshot['rows'],snapshot.get('current_speaker'))
         self.router.note_ai(group,"", request=event.get_message_str(),sender=str(event.get_sender_id()),pending=True)
         self.save_context()
+        activity=getattr(self,'model_activity',None)
+        if activity:
+            provider_id=event.get_extra('selected_provider') or self.config.get('bindings',{}).get(self.routing_persona(event))
+            provider=self.context.get_provider_by_id(provider_id) if provider_id else None
+            activity.emit('request_ready',**event_trace(event),purpose='main_reply',provider=provider_id,model=provider.get_model() if provider else 'unknown',context_messages=len(getattr(request,'contexts',None) or []),image_count=count_image_parts(getattr(request,'contexts',None),getattr(request,'image_urls',None),getattr(request,'extra_user_content_parts',None)),tool_count=len(request.func_tool.names()) if getattr(request,'func_tool',None) else 0,input_chars=len(request.system_prompt or '')+len(request.prompt or ''))
+
+    @filter.on_llm_response(priority=-1300)
+    async def log_reply_completion(self,event: AstrMessageEvent,response):
+        if not self.scoped_group(event):return
+        activity=getattr(self,'model_activity',None)
+        if activity:
+            activity.emit('reply_done',**event_trace(event),purpose='main_reply',outcome='agent_finished',image_tool_calls=event.get_extra('qq_image_tools_started') or 0,seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3))
 
     def prepare_performance_context(self,event,request):
         settings=self.config.get('performance',{})
@@ -486,6 +518,9 @@ class PersonaModelBindings(Star):
         group = self.scoped_group(event)
         result = event.get_result()
         if group and result is not None and result.is_llm_result():
+            activity=getattr(self,'model_activity',None)
+            if activity:
+                activity.emit('sent',**event_trace(event),seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3),image_tool_calls=event.get_extra('qq_image_tools_started') or 0)
             self.router.note_ai(group,result.get_plain_text() or "[AI发送了图片或其他内容]", request=event.get_message_str(),sender=str(event.get_sender_id()))
             self.save_context()
             owner=event.get_extra('qq_history_owner')
@@ -501,6 +536,10 @@ class PersonaModelBindings(Star):
     async def reply_status(self):
         from quart import jsonify
         return jsonify({"status":"ok","data":{"settings":self.router.settings,"stats":dict(self.router.stats),"cached_groups":len(self.router.groups),"history_persistent":True,"history_recovery":"persona_scoped_native_history","mention_resume_window_seconds":300}})
+
+    async def model_activity_status(self):
+        from quart import jsonify
+        return jsonify({'status':'ok','data':self.model_activity.status()})
 
     async def test_reply_conditions(self):
         from quart import request, jsonify
