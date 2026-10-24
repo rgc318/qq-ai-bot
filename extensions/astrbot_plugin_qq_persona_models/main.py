@@ -21,9 +21,10 @@ from .single_judge import skip_second_judge
 from .image_upload_compat import ImageUploadAdapter
 from .chat_history_store import ChatHistoryStore,scope_id
 from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
+from .group_permission_compat import GroupPermissionAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.3.2")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.3.3")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -31,6 +32,7 @@ class PersonaModelBindings(Star):
         self.router = ReplyRouter(dict(config.get("reply_conditions", {})), self.judge_reply)
         self.image_upload_adapter=ImageUploadAdapter(dict(config.get('image_upload_compat',{})))
         self.image_quote_adapter=ImageQuoteAdapter(self.scoped_group)
+        self.group_permission_adapter=GroupPermissionAdapter(lambda:self.router.settings.get('allowed_groups',[]))
         self.chat_history_store=None
         self.history_job=None
         self.history_bootstrap={}
@@ -38,6 +40,7 @@ class PersonaModelBindings(Star):
     async def initialize(self):
         self.image_upload_adapter.install(self.context)
         self.image_quote_adapter.install(self.context)
+        self.group_permission_adapter.install(self.context)
         self.cache_path=StarTools.get_data_dir('astrbot_plugin_qq_persona_models')/'reply_context.json'
         if self.cache_path.is_file():
             try:
@@ -59,12 +62,14 @@ class PersonaModelBindings(Star):
     async def refresh_image_upload_adapter(self,metadata):
         self.image_upload_adapter.install(self.context)
         self.image_quote_adapter.install(self.context)
+        self.group_permission_adapter.install(self.context)
         if getattr(metadata,'name','')=='astrbot_plugin_user_policy':
             self.start_history_bootstrap()
 
     async def terminate(self):
         self.image_upload_adapter.restore()
         self.image_quote_adapter.restore()
+        self.group_permission_adapter.restore()
         if self.history_job is not None and not self.history_job.done():
             await self.history_job
 
@@ -203,6 +208,9 @@ class PersonaModelBindings(Star):
     async def verify_memory_meme(self):
         from quart import jsonify, request
         payload=await request.get_json(silent=True) or {}
+        if payload.get('group_permissions_only'):
+            from .group_permission_checks import verify_group_permissions
+            return jsonify({'status':'ok','data':await verify_group_permissions(self)})
         if payload.get('quote_image_inspect'):
             from .image_quote_checks import inspect_quoted_image
             return jsonify({'status':'ok','data':await inspect_quoted_image(self,payload)})
@@ -624,4 +632,4 @@ class PersonaModelBindings(Star):
             handlers = star_handlers_registry.get_handlers_by_event_type(event_type)
             relevant = [{"handler":h.handler_full_name,"priority":h.extras_configs.get("priority")} for h in handlers if "user_policy" in h.handler_full_name or "qq_persona_models" in h.handler_full_name or "self_initiated_reply" in h.handler_full_name]
             orders[event_type.name] = relevant
-        return jsonify({"status":"ok","data":results,"handler_order":orders,"image_upload_adapter_active":self.image_upload_adapter.target is not None,"image_quote_adapter_active":len(self.image_quote_adapter.patches)==4})
+        return jsonify({"status":"ok","data":results,"handler_order":orders,"image_upload_adapter_active":self.image_upload_adapter.target is not None,"image_quote_adapter_active":len(self.image_quote_adapter.patches)==4,"group_permission_adapter_active":self.group_permission_adapter.target is not None})
