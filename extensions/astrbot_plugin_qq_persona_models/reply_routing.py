@@ -14,6 +14,7 @@ import time
 from typing import Any, Awaitable, Callable
 from .meme_intent import wants_existing_meme
 from .image_followup import public_activity
+from .dialogue_continuity import continuity_evidence, is_unambiguous_continuation
 
 
 JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的发言对象判断器，判断最新消息是否在和 AI 助手互动。先判断对话对象，不以是否有具体任务为前提。
@@ -21,6 +22,8 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的发言对象判断器，判断最新
 route 只能为 addressed、followup、ambient。
 - addressed：明确向AI发言就成立，包括叫名字/称号、打招呼、唤醒、撒娇、闲聊、回答AI的问题、表达感受、提出任务。无需具体问题或任务。比如刚叫“ChatGPT大人”后又说“wake up”“醒醒”“怎么不理我”，应结合前文判断对象是AI，不可因没有任务而拒绝。仅讨论模型、转述别人叫AI的内容不算。
 - 结合 recent_messages 的多条消息判断，不能只看最后一句。一个成员可以分几条说完一个意思，其他成员也能加入同一事件，补充条件或提出不同诉求。发言者ID不同就不是同一个人；不要把群友之间的回应错认成对AI的回应。
+- dialogue_continuity 是程序核对发言顺序得到的对话关系证据。established=true 表示当前发言者此前明确在和AI互动，之后没有其他成员插话、转向别人或对象尚未确认的中间发言。在这种连续对话里，默认“你”指AI；“你是谁、现在用哪个模型、怎么没反应”等都可 addressed，不要求有新任务，不因之前生成较慢就转为 human。established=false 时不得套用此默认，尤其 unclassified_turns>0 必须重新检查收件人。若判 human，必须在消息中确实有指向人的证据，不能凭空假定有一位群友正在与用户对话。
+- 转向人的证据可以仅来自用户自己的前文，不要求那个人已经发言。例如用户先问过AI，后来自己说“小张，我现在问你，不是问机器人”，最新再说“你是谁/你是哪个班的”，应 recipient=human、ambient；过去的 last_ai_activity 不能覆盖这个新的收件人。
 - 本群约定：独立、肯定的表情发送指令（如“发个开心的表情包”）默认由机器人受理，选择 addressed；不要求昵称或既往 AI 任务。仅在上下文确有群友互相索要表情、点名别人、转述、否定或非请求等证据时选择 ambient。不要凭空编造收件人。这条约定不扩展到“也给我一份”等没有独立任务内容的模糊追问。
 - followup：最新消息在延续 last_ai_activity 中 AI 正在处理或先前完成的具体任务。允许不同成员加入，如 A 请 AI 写文案，AI 写完后 B 说“给我也整一份”；也包括“再短点”“为什么这样”“第二步展开说”“换成蓝色”“继续”“给我也来张”。不同群友在旁边聊别的话，不会自动结束这条任务，但必须确认最新消息实际指向这条 AI 任务。
 - ambient：对话对象是群友、讨论/转述AI、无关插话、明确不让机器人回答、对象不明时均选择此项。无对象的简单附和或表情通常不接；但若是在回答AI刚提出的问题，应按 addressed 判断，不要求它重新提问。
@@ -88,7 +91,13 @@ class ReplyRouter:
         ctx.last_ai = {"id":f"ai-{ctx.sequence}","time":self.clock(),"status":"pending" if pending else "sent","request":request[:600],"requested_by":sender,"reply":text[:1600]}
         ctx.latest_requests.pop(sender, None)
         if not pending:
-            ctx.messages.append({"role":"assistant","sender":"bot","name":"AI","time":self.clock(),"text":text[:1000]})
+            ctx.messages.append({"role":"assistant","sender":"bot","name":"AI","requested_by":sender,"time":self.clock(),"text":text[:1000]})
+
+    def note_progress(self, group, text, *, sender, kind='progress'):
+        # Already-sent courtesy lines and tool outcomes belong in the receiver
+        # classifier's timeline, without replacing the original request/anchor.
+        self.context(group).messages.append({'role':'assistant','sender':'bot','name':'AI',
+            'requested_by':sender,'time':self.clock(),'text':str(text)[:600],'kind':kind})
 
     def unanswered_request(self, group, sender, window=300):
         candidate=self.context(group).latest_requests.pop(sender,None)
@@ -179,10 +188,14 @@ class ReplyRouter:
             return self._result("ambient","non_request_or_command")
         now = self.clock()
         aliases = self.settings.get("aliases",[])
+        continuity = continuity_evidence(list(ctx.messages)[:-1], sender, now, self.settings)
         anchor = ctx.last_ai
         valid_age = float(self.settings.get("followup_window_seconds",1800))
         if anchor and anchor.get("status")=="pending":
             valid_age = min(valid_age,120)
+            if continuity['established'] and anchor.get('requested_by') == sender:
+                valid_age = max(valid_age, min(float(self.settings.get('followup_window_seconds',1800)),
+                    float(continuity['window_seconds'])))
         if not anchor or now-anchor["time"] > valid_age:
             anchor = None
         image_turn=ctx.image_turn if self.settings.get('image_context_enabled',True) else None
@@ -197,6 +210,7 @@ class ReplyRouter:
         capability_request=wants_existing_meme(text)
         image_evidence=bool(image_turn and (image_turn.get('requested_by')==sender or has_alias or _PRIORITY_HINT.search(text)))
         recent_addressing=any(old.get('role')=='user' and not old.get('targets_other') and (old.get('directed_to_bot') or any(alias.casefold() in old.get('text','').casefold() for alias in aliases if alias)) and (not isinstance(old.get('time'),(int,float)) or now-old['time']<=180) for old in list(ctx.messages)[-13:-1])
+        recent_addressing = recent_addressing or continuity['established']
         if anchor is None and not image_evidence and not has_alias and not capability_request and not recent_addressing:
             return self._result("ambient","no_recent_ai_task_or_address")
         interval = float(self.settings.get("user_min_interval_seconds",2))
@@ -207,6 +221,12 @@ class ReplyRouter:
             ctx.fast_times[sender]=now
             while len(ctx.fast_times)>256:del ctx.fast_times[next(iter(ctx.fast_times))]
             return self._result('fast','standalone_bot_name_call',recipient='bot',confidence=1.0,reference=None,judged=False,judge_seconds=0)
+        if is_unambiguous_continuation(text, continuity):
+            incoming_row['directed_to_bot']=True
+            ctx.fast_times[sender]=now
+            return self._result('fast','same_speaker_dialogue',recipient='bot',confidence=1.0,
+                reference=None,judged=False,judge_seconds=0,continuity_established=True,
+                address_age_seconds=continuity['origin_age_seconds'],intervening_speakers=0)
         if now < ctx.judge_retry_at:
             return context_fallback('judge_backoff',judged=True) or self._result('ambient','judge_backoff',judged=True)
         judged_anchor = {**anchor,"age_seconds":round(max(0,now-anchor["time"]),1)} if anchor else None
@@ -219,7 +239,10 @@ class ReplyRouter:
             if budget<=0: break
             rows.append(clipped)
             budget-=len(clipped['text'])
-        payload = {"bot_aliases":aliases,"recent_addressing_evidence":recent_addressing,"last_ai_activity":judged_anchor,"recent_image_activity":public_activity(image_turn,now),"recent_messages":list(reversed(rows)),"latest_message":{"sender":sender,"name":name[:60],"text":text[:1200]}}
+        payload = {"bot_aliases":aliases,"recent_addressing_evidence":recent_addressing,"dialogue_continuity":continuity,"last_ai_activity":judged_anchor,"recent_image_activity":public_activity(image_turn,now),"recent_messages":list(reversed(rows)),"latest_message":{"sender":sender,"name":name[:60],"text":text[:1200]}}
+        judge_evidence = {'judge_recent_messages':len(rows),'judge_recent_chars':sum(len(row['text']) for row in rows),
+            'continuity_established':continuity['established'],'intervening_speakers':continuity['other_speaker_count'],
+            'unclassified_turns':continuity['unclassified_turns'],'address_age_seconds':continuity.get('origin_age_seconds')}
         acquired = False
         attempted = False
         started=time.monotonic()
@@ -235,23 +258,23 @@ class ReplyRouter:
             route = verdict.get("route")
             recipient=verdict.get('recipient')
             if verdict.get('silence_requested') is True or recipient in ('human','unclear'):
-                return self._result('ambient','recipient_not_bot_or_silence',recipient=recipient,confidence=confidence,judged=True,judge_seconds=elapsed)
+                return self._result('ambient','recipient_not_bot_or_silence',recipient=recipient,confidence=confidence,judged=True,judge_seconds=elapsed,**judge_evidence)
             # Do not let an otherwise clear call be rejected solely for lacking
             # a task; only normalize a complete, confident recipient decision.
             if recipient=='bot' and verdict.get('silence_requested') is False and route=='ambient':route='addressed'
             if route not in ("addressed","followup"):
-                return self._result("ambient","judge_declined" if route=="ambient" else "invalid_judgment",confidence=confidence,judged=True,judge_seconds=elapsed)
+                return self._result("ambient","judge_declined" if route=="ambient" else "invalid_judgment",confidence=confidence,judged=True,judge_seconds=elapsed,**judge_evidence)
             if not 0 <= confidence <= 1 or confidence < float(self.settings.get("confidence_threshold",0.88)):
-                return self._result("ambient","judge_not_confident",confidence=confidence,judged=True,judge_seconds=elapsed)
+                return self._result("ambient","judge_not_confident",confidence=confidence,judged=True,judge_seconds=elapsed,**judge_evidence)
             if route=="followup" and verdict.get('anchor_id') not in anchors:
-                return self._result("ambient","missing_or_invalid_ai_anchor",judged=True,judge_seconds=elapsed)
+                return self._result("ambient","missing_or_invalid_ai_anchor",judged=True,judge_seconds=elapsed,**judge_evidence)
             if route=="addressed" and not (has_alias or anchor or image_turn or capability_request or recent_addressing):
-                return self._result("ambient","no_addressing_evidence",judged=True,judge_seconds=elapsed)
+                return self._result("ambient","no_addressing_evidence",judged=True,judge_seconds=elapsed,**judge_evidence)
             ctx.fast_times[sender] = now
             incoming_row['directed_to_bot']=True
             while len(ctx.fast_times)>256:
                 del ctx.fast_times[next(iter(ctx.fast_times))]
-            return self._result("fast","semantic_"+route,recipient=recipient or 'bot',confidence=confidence,reference=anchors.get(verdict.get('anchor_id')) if route=='followup' else None,judged=True,judge_seconds=elapsed)
+            return self._result("fast","semantic_"+route,recipient=recipient or 'bot',confidence=confidence,reference=anchors.get(verdict.get('anchor_id')) if route=='followup' else None,judged=True,judge_seconds=elapsed,**judge_evidence)
         except (Exception, asyncio.TimeoutError) as exc:
             # A failed semantic request is not a reason to call a second judge.
             # Native explicit mentions above bypass this short, per-group backoff.

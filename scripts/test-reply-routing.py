@@ -339,5 +339,139 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.gather(*pending)
 
+
+class DialogueContinuityTests(unittest.IsolatedAsyncioTestCase):
+    setUp=ReplyRoutingTests.setUp
+
+    async def start_exchange(self):
+        self.verdict={'route':'ambient','recipient':'human','silence_requested':False,'confidence':0.99}
+        await self.router.decide('group','A','重新生成一下',explicit=True,message_id='original')
+        self.router.note_ai('group','',request='重新生成一下',sender='A',pending=True)
+
+    async def test_identity_after_three_minutes_without_other_speakers(self):
+        await self.start_exchange()
+        self.now+=183
+        result=await self.router.decide('group','A','你是谁',message_id='identity')
+        self.assertEqual(result['reason'],'same_speaker_dialogue')
+        self.assertEqual(result['judge_seconds'],0)
+        self.assertIsNone(result['reference'])
+        self.assertFalse(self.calls)
+
+    async def test_continuous_followups_keep_receiver_without_tasks(self):
+        await self.start_exchange()
+        for text in ('那你现在用的是哪个模型？','你还在吗','醒醒'):
+            self.now+=30
+            result=await self.router.decide('group','A',text)
+            self.assertEqual(result['reason'],'same_speaker_dialogue')
+        self.assertFalse(self.calls)
+
+    async def test_pending_context_retained_for_same_speaker_only(self):
+        await self.start_exchange()
+        self.router.settings['followup_window_seconds']=1800
+        self.now+=183
+        self.verdict={'route':'addressed','recipient':'bot','silence_requested':False,'confidence':0.99}
+        result=await self.router.decide('group','A','现在使用哪个模型呢？')
+        self.assertEqual(result['route'],'fast')
+        payload=self.calls[-1]
+        self.assertTrue(payload['dialogue_continuity']['established'])
+        self.assertEqual(payload['last_ai_activity']['status'],'pending')
+        self.assertEqual(payload['last_ai_activity']['age_seconds'],183)
+        self.assertEqual(result['judge_recent_messages'],2)
+
+    async def test_other_member_interruption_still_uses_classifier(self):
+        await self.start_exchange()
+        self.router.context('group').messages.append({'role':'user','sender':'B','text':'有人找我吗','time':self.now+1})
+        self.now+=30
+        result=await self.router.decide('group','A','你是谁')
+        self.assertEqual(result['route'],'ambient')
+        self.assertFalse(self.calls[-1]['dialogue_continuity']['established'])
+        self.assertEqual(result['intervening_speakers'],1)
+
+    async def test_known_other_target_wins_over_continuity(self):
+        await self.start_exchange()
+        self.now+=30
+        result=await self.router.decide('group','A','你是谁',targets_other=True)
+        self.assertEqual(result['reason'],'explicitly_targets_another_person')
+        self.assertFalse(self.calls)
+
+    async def test_plain_named_human_and_following_you_are_not_hijacked(self):
+        await self.start_exchange()
+        self.now+=30
+        first=await self.router.decide('group','A','小张，你是哪个班的？')
+        self.now+=3
+        second=await self.router.decide('group','A','你是谁')
+        self.assertEqual((first['route'],second['route']),('ambient','ambient'))
+        self.assertEqual(self.calls[-1]['dialogue_continuity']['unclassified_turns'],1)
+        self.assertEqual(len(self.calls),2)
+
+    async def test_silence_request_is_not_locally_woken(self):
+        await self.start_exchange()
+        self.verdict={'route':'ambient','recipient':'bot','silence_requested':True,'confidence':0.99}
+        self.now+=30
+        result=await self.router.decide('group','A','你先别回复我了')
+        self.assertEqual(result['route'],'ambient')
+        self.assertEqual(len(self.calls),1)
+
+    async def test_quote_and_group_plural_need_semantic_judgment(self):
+        for text in ('“你是谁”是他问小张的原话','你们晚上吃什么'):
+            self.setUp()
+            await self.start_exchange()
+            self.now+=30
+            result=await self.router.decide('group','A',text)
+            self.assertEqual(result['route'],'ambient')
+            self.assertEqual(len(self.calls),1)
+
+    async def test_continuity_expires_and_can_be_disabled(self):
+        await self.start_exchange()
+        self.now+=601
+        self.assertEqual((await self.router.decide('group','A','你是谁'))['route'],'ambient')
+        self.setUp()
+        await self.start_exchange()
+        self.router.settings['dialogue_continuity_enabled']=False
+        self.now+=30
+        self.assertEqual((await self.router.decide('group','A','你是谁'))['route'],'ambient')
+        self.assertEqual(len(self.calls),1)
+
+    async def test_new_speaker_does_not_inherit_exclusive_receiver(self):
+        await self.start_exchange()
+        self.now+=30
+        result=await self.router.decide('group','B','你是谁')
+        self.assertEqual(result['route'],'ambient')
+        self.assertFalse(self.calls[-1]['dialogue_continuity']['established'])
+
+    async def test_progress_preserves_request_and_is_available_to_judge(self):
+        await self.start_exchange()
+        anchor=dict(self.router.context('group').last_ai)
+        self.now+=500
+        self.router.note_progress('group','我来把柴犬拟成人形。',sender='A',kind='image_notice')
+        self.router.note_progress('group','[图片已下发：执行状态摘要]',sender='A',kind='image_tool_status')
+        self.assertEqual(self.router.context('group').last_ai,anchor)
+        self.now+=200
+        self.verdict={'route':'addressed','recipient':'bot','silence_requested':False,'confidence':0.99}
+        await self.router.decide('group','A','现在使用哪个模型呢？')
+        payload=self.calls[-1]
+        self.assertTrue(payload['dialogue_continuity']['established'])
+        self.assertEqual(payload['dialogue_continuity']['age_seconds'],200)
+        self.assertEqual([r['kind'] for r in payload['recent_messages'] if r.get('kind')],['image_notice','image_tool_status'])
+
+    async def test_progress_does_not_erase_intervening_people(self):
+        await self.start_exchange()
+        self.router.context('group').messages.append({'role':'user','sender':'B','text':'我在和你说话','time':self.now+1})
+        self.now+=10
+        self.router.note_progress('group','图片已发送',sender='A',kind='image_tool_status')
+        result=await self.router.decide('group','A','你是谁')
+        self.assertEqual(result['route'],'ambient')
+
+    async def test_restored_dialogue_does_not_resurrect_pending_task(self):
+        await self.start_exchange()
+        self.router.settings['followup_window_seconds']=1800
+        saved=self.router.snapshot(wall_time=10000)
+        restored=module.ReplyRouter(self.router.settings,self.router.judge,clock=lambda:5000)
+        restored.restore(saved,wall_time=10183)
+        self.assertIsNone(restored.context('group').last_ai)
+        result=await restored.decide('group','A','你是谁')
+        self.assertEqual(result['reason'],'same_speaker_dialogue')
+        self.assertFalse(self.calls)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)

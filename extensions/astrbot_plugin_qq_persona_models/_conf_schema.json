@@ -38,6 +38,8 @@
   "reply_conditions": {"type":"object","description":"语境追问快速回复","items":{
     "enabled":{"type":"bool","description":"启用语义判断","default":true},
     "direct_name_call":{"type":"bool","description":"单独呼叫已配置称呼时直接唤醒，如ChatGPT大人、龙娘姐姐在吗；不改变当前人格","default":true},
+    "dialogue_continuity_enabled":{"type":"bool","description":"同一用户与AI连续对话、无其他成员插话或转向别人时，明确第二人称追问直接接话；其余消息带关系证据交给判断模型","default":true},
+    "dialogue_continuity_window_seconds":{"type":"int","description":"连续对话最长空闲秒数（最多1800）；中途开工对白及图片状态会更新，其他成员插话后回归语义判断","default":600},
     "allowed_groups":{"type":"list","description":"生效群号","default":["347440128"]},
     "judge_provider_id":{"type":"string","description":"语义判断模型","default":"qq-reply-judge-fast","_special":"select_provider"},
     "followup_window_seconds":{"type":"int","description":"AI 对话关联窗口（秒）","default":1800},

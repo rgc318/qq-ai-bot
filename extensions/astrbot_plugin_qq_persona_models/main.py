@@ -27,7 +27,7 @@ from .model_logging import ModelActivityLogger,event_trace,model_operation,count
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.6.1")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -348,10 +348,24 @@ class PersonaModelBindings(Star):
         event.set_extra('qq_image_pending_notice_sent',True)
         try:
             await event.send(event.plain_result(text))
+            self.record_dialogue_progress(event,text,'image_notice')
         except Exception as exc:
             # A failed courtesy message must not abort paid image generation.
             label='QQ生图诊断' if event.get_extra('qq_diagnostic') else 'QQ生图提示'
             logger.warning('[%s] 提示发送失败，继续执行图片工具，类型=%s',label,type(exc).__name__)
+
+    def record_dialogue_progress(self,event,text,kind):
+        if event.get_extra('qq_diagnostic') or not self.router.settings.get('dialogue_continuity_enabled',True):return False
+        group=self.scoped_group(event)
+        scope=event.get_extra('qq_reply_scope')
+        if not group or not scope or self.router.context(group).scope!=scope:return False
+        try:
+            self.router.note_progress(group,text,sender=str(event.get_sender_id()),kind=kind)
+            self.save_context()
+            return True
+        except Exception as exc:
+            logger.warning('[QQ对话衔接] 中途状态记录失败，类型=%s',type(exc).__name__)
+            return False
 
     async def generate_image_notice(self,event,tool_name,args):
         """Only if the main tool call omitted its line; never a canned reply."""
@@ -454,7 +468,8 @@ class PersonaModelBindings(Star):
             provider=self.context.get_provider_by_id(self.router.settings.get('judge_provider_id'))
             model=provider.get_model() if provider and verdict.get('judged') else 'not_called'
             next_step='normal_pipeline_eligible' if event.is_at_or_wake_command else 'main_reply_not_started' if verdict.get('judged') else 'background_reply_path'
-            activity.emit('routing_done',**trace,model=model,route=verdict['route'],reason=verdict['reason'],seconds=verdict.get('judge_seconds',0),error_type=verdict.get('error_type'),next=next_step)
+            evidence={key:verdict.get(key) for key in ('recipient','confidence','judge_recent_messages','judge_recent_chars','continuity_established','intervening_speakers','unclassified_turns','address_age_seconds')}
+            activity.emit('routing_done',**trace,model=model,route=verdict['route'],reason=verdict['reason'],seconds=verdict.get('judge_seconds',0),error_type=verdict.get('error_type'),next=next_step,**evidence)
 
     @filter.on_llm_request(priority=-1200)
     async def attach_reference_and_track_request(self, event: AstrMessageEvent, request):
@@ -528,13 +543,18 @@ class PersonaModelBindings(Star):
     @filter.on_llm_tool_respond(priority=-1200)
     async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
         if not self.scoped_group(event) or event.get_extra('qq_diagnostic') or getattr(tool,'name','') not in ('generate_image','generate_selfie'):return
+        status=result_state(tool_result)
+        summaries={'sent':'[图片工具已报告成功下发图片；这是执行状态，不是图片内容或聊天原话。]',
+            'failed':'[图片工具执行失败；这是执行状态，不是聊天原话。]',
+            'result_unconfirmed':'[图片工具已返回，图片是否发送尚未确认；这是执行状态。]'}
+        self.record_dialogue_progress(event,summaries[status],'image_tool_status')
         turn=event.get_extra('qq_current_image_turn')
         if turn is not None:
             ctx=self.router.context(self.scoped_group(event))
             if ctx.image_turn and ctx.image_turn['id']==turn['id'] and (not event.get_extra('qq_reply_scope') or ctx.scope==event.get_extra('qq_reply_scope')):
                 turn=ctx.image_turn
                 event.set_extra('qq_current_image_turn',turn)
-            turn['status']=result_state(tool_result)
+            turn['status']=status
             self.save_context()
 
     def prepare_performance_context(self,event,request):
@@ -608,11 +628,14 @@ class PersonaModelBindings(Star):
         for item in payload.get("history",[])[:24]:
             text = str(item.get("text",""))[:1200]
             if item.get("role")=="assistant":
-                router.note_ai("simulation",text,request=str(item.get("request",""))[:600],pending=bool(item.get("pending")))
+                router.note_ai("simulation",text,request=str(item.get("request",""))[:600],sender=str(item.get('sender','')),pending=bool(item.get("pending")))
                 if ctx.last_ai:
                     ctx.last_ai["time"] -= max(0,float(item.get("age_seconds",0)))
             else:
-                ctx.messages.append({"role":"user","sender":str(item.get("sender","user")),"text":text})
+                row={"role":"user","sender":str(item.get("sender","user")),"text":text,
+                    'directed_to_bot':bool(item.get('directed_to_bot')),'targets_other':bool(item.get('targets_other'))}
+                if 'age_seconds' in item:row['time']=router.clock()-max(0,min(86400,float(item['age_seconds'])))
+                ctx.messages.append(row)
         verdict = await router.decide("simulation",str(payload.get("sender","B")),str(payload.get("message",""))[:1200],message_id="test",explicit=bool(payload.get("explicit")),targets_other=bool(payload.get("targets_other")))
         extras = {}
         event = SimpleNamespace(is_wake=False,is_at_or_wake_command=False,set_extra=lambda key,value:extras.__setitem__(key,value))
@@ -621,7 +644,8 @@ class PersonaModelBindings(Star):
         utils = importlib.import_module("data.plugins.astrbot_plugin_self_initiated_reply.utils")
         handled_as_direct = utils.is_explicit_direct_call(event, str(payload.get("message",""))) if event.is_at_or_wake_command else False
         skipped=skip_second_judge(self.context,event,verdict,self.router.settings.get('single_judge',True))
-        return jsonify({"status":"ok","data":{"route":verdict["route"],"reason":verdict["reason"],"confidence":verdict.get("confidence"),"judge_seconds":verdict.get('judge_seconds',0),"second_judge_skipped":skipped,"normal_pipeline_eligible":event.is_at_or_wake_command,"selfreply_sees_direct_call":handled_as_direct,"qq_messages_sent":0}})
+        evidence={key:verdict.get(key) for key in ('recipient','judge_recent_messages','judge_recent_chars','continuity_established','intervening_speakers','unclassified_turns','address_age_seconds')}
+        return jsonify({"status":"ok","data":{"route":verdict["route"],"reason":verdict["reason"],"confidence":verdict.get("confidence"),"judge_seconds":verdict.get('judge_seconds',0),"second_judge_skipped":skipped,"normal_pipeline_eligible":event.is_at_or_wake_command,"selfreply_sees_direct_call":handled_as_direct,"qq_messages_sent":0,**evidence}})
 
     async def verify_reply_hooks(self):
         from quart import jsonify
@@ -712,6 +736,21 @@ class PersonaModelBindings(Star):
             checks['single_judge_'+name]=negative.get_extra('qq_single_judge_complete') and not scheduler_calls and not negative.is_at_or_wake_command and not negative.is_stopped()
         ordinary=SimulatedEvent('ordinary','今晚真热闹')
         checks['unclassified_ambient_keeps_selfreply']=not skip_second_judge(self.context,ordinary,{'route':'ambient','judged':False}) and not ordinary.get_extra('qq_single_judge_complete')
+        # The live callbacks run against this isolated router with no cache_path.
+        # Exercise progress bookkeeping without ever invoking event.send.
+        ctx=probe.router.context(group);ctx.scope='continuity-fixture'
+        progress=SimulatedEvent('A','重新生成一下')
+        progress.set_extra('qq_reply_scope',ctx.scope)
+        before=dict(ctx.last_ai)
+        checks['progress_callback_records_sent_notice']=probe.record_dialogue_progress(progress,'我来照着参考图改。','image_notice')
+        checks['progress_preserves_original_task']=ctx.last_ai==before and ctx.messages[-1]['kind']=='image_notice'
+        await probe.track_image_tool_result(progress,SimpleNamespace(name='generate_image'),{},SimpleNamespace(content=[SimpleNamespace(text='系统提示：已成功下发 1 张图。')],isError=False))
+        checks['image_result_enters_receiver_timeline']=ctx.messages[-1].get('kind')=='image_tool_status' and '成功下发' in ctx.messages[-1]['text']
+        progress.set_extra('qq_reply_scope','another-persona')
+        size=len(ctx.messages)
+        checks['progress_respects_persona_scope']=not probe.record_dialogue_progress(progress,'不应串人格','image_notice') and len(ctx.messages)==size
+        progress.set_extra('qq_reply_scope',ctx.scope);progress.set_extra('qq_diagnostic',True)
+        checks['diagnostic_progress_is_not_persisted']=not probe.record_dialogue_progress(progress,'诊断不写入','image_notice') and len(ctx.messages)==size
         return jsonify({"status":"ok","data":{"checks":checks,"passed":all(checks.values()),"qq_messages_sent":0,"model_calls":0,"judge_mode":"fixture"}})
 
     def bind(self, event):
