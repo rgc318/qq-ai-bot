@@ -17,10 +17,12 @@ GIF 改图兼容已启用（本地插件 1.2.11）：参考图是 GIF 表情包�
 | 人格 | 模型 | 协议与参数 |
 | --- | --- | --- |
 | 大肥鱼（测试群默认） | siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017 | Chat Completions，支持读图与工具 |
-| ChatGPT龙娘 | cliproxyapi/gpt-6.1-sol | Responses，reasoning_effort=low，支持读图与工具 |
+| ChatGPT龙娘 | cliproxyapi/gpt-6.1-sol | 原 LiteLLM Chat Completions，low 参数透传，已实测读图与工具往返 |
 | 生图工具 | gpt-image-2.5 | Images Generations / Edits，由万象画卷调用，已验证单张参考图改图 |
 
-群 347440128 使用大肥鱼。群聊使用共享的近期上下文，便于理解不同群友正在讨论什么；多人格管理同时为各人格隔离 AstrBot 对话历史。旧的历史没有删除。群成员原先的个人会话会保留，但切换为共享群上下文后，新对话使用群会话来源。
+群 347440128 最初默认大肥鱼，目前用户已切为 ChatGPT龙娘；以多人格管理后台的实时设置为准。群聊使用共享的近期上下文，便于理解不同群友正在讨论什么；多人格管理同时为各人格隔离 AstrBot 对话历史。旧的历史没有删除。群成员原先的个人会话会保留，但切换为共享群上下文后，新对话使用群会话来源。
+
+2026-10-24 按用户要求，龙娘绑定改为 `litellm-lan/cliproxyapi/gpt-6.1-sol`，原 `qq-dragon-sol-low` Responses 配置保留。Chat Completions 的高级请求体增加 `reasoning_effort=low`、`allowed_openai_params=["reasoning_effort"]`，只对这个 Provider 透传参数，避免 LiteLLM 旧能力表拒绝请求；单次输出上限 4096。该兼容路线在本地代理中实测有效，不代表 OpenAI 官方接口对 Sol 的工具协议约定改变。复现、验证与回滚见 [原 LiteLLM ChatGPT 接口试用](original-chatgpt-route-2026-10-24.md)。
 
 人格原文可编辑：`personas/大肥鱼.md`、`personas/ChatGPT龙娘.md`。通过后台修改已保存人格立即生效；只修改本地 Markdown 不会自动同步。再次运行 `scripts/configure-enhancement.py` 会把本地模板应用到后台，并重设本说明中的部署参数，应先保留后台自定义内容。
 
