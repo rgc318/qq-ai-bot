@@ -2,6 +2,8 @@
 
 2026-10-24，本地插件 1.5.0。日志在 AstrBot 原有日志页面及 Docker 容器日志中显示，统一前缀 `[AI调用]`。
 
+1.6.1 补充：新增“绘图参考图检查”，记录 available_reference_count、attached_reference_count 与 selected_previous_reference，不打印路径或图片。routing_done 的 normal_pipeline_eligible 只代表允许进入后续流程，命令等可能提前处理，真正的模型开始以 start 为准。修复一个旧参考图自检事件缺少 qq_diagnostic 标记的问题，新增回调完成和不改生产图片任务的断言，避免钩子异常被框架捕获后检查仍显示通过。最近实际问题和计时口径见 [运行审计](runtime-audit-2026-10-24.md)。
+
 1.5.1 修复：实际事件出现 `ContextVar ... was created in a different Context`，来自 1.5.0 包装在异步 yield 期间保留追踪 token；消费者提前结束、Python 在另一任务清理生成器时会重置失败，并可能让后台记忆继承 main_reply 用途。现在每次读取和关闭单独设置/还原作用域，yield 时不保留 token，记忆来源的用途优先于继承标签。新增跨任务关闭、上下文不泄漏、记忆用途覆盖检查，总计 26 项通过。使用真实龙娘和原生执行器提前读取、另一任务关闭的路径复测通过（约 12.34 秒），返回 generate_image 并捕获开工对白；不实际生图或发 QQ 消息。报告：`logs/model-logging-cross-context-fix.json`、`logs/model-logging-early-close-native-check.json`。这一修复针对新增日志缺陷，不能把现场没有图片工具调用自动解释为它阻断了生图。
 
 ## 看哪里卡住

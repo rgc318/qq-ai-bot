@@ -66,6 +66,7 @@ async def verify_chat_image_references(plugin):
     from astrbot.core.astr_agent_hooks import MAIN_AGENT_HOOKS
     from .image_tool_compat import prepare_chat_image_tools
     omni=plugin.context.get_registered_star('astrbot_plugin_omnidraw').star_cls
+    before_turns=deepcopy({key:value.image_turn for key,value in plugin.router.groups.items()})
     checks={}
     full=plugin.context.get_llm_tool_manager().get_full_tool_set()
     original={t.name:deepcopy(t.parameters) for t in full.tools if t.name in ('generate_image','generate_selfie')}
@@ -78,13 +79,15 @@ async def verify_chat_image_references(plugin):
     with TemporaryDirectory(prefix='qq-image-reference-check-',dir='/AstrBot/data/temp') as temporary:
         paths=[str(Path(temporary)/name) for name in ('rabbit.png','wolf.png')]
         for color,path in zip(('red','blue'),paths):PILImage.new('RGB',(16,16),color).save(path)
-        extra={}
+        extra={'qq_diagnostic':True}
         notices=[]
         async def capture(result):notices.append(result)
         event=SimpleNamespace(plugins_name=None,is_stopped=lambda:False,is_private_chat=lambda:False,get_group_id=lambda:group,get_sender_id=lambda:'diagnostic-user',get_self_id=lambda:'diagnostic-bot',get_extra=lambda k,default=None:extra.get(k,default),set_extra=lambda k,v:extra.__setitem__(k,v),send=capture,plain_result=lambda text:text,message_obj=SimpleNamespace(message=[Image.fromFileSystem(p) for p in paths]))
         args={'prompt':'保留漫画构图，用两张参考图分别替换兔子和恶魔狼','aspect_ratio':'3:4','count':1,'return_result':True,'refs':'\n'.join(paths),'pending_message':'两张参考图收到了，我来把角色换进去。'}
         tool=req.func_tool.get_tool('generate_image')
         await MAIN_AGENT_HOOKS.on_tool_start(SimpleNamespace(context=SimpleNamespace(event=event)),tool,args)
+        checks['normalizer_completed_in_probe']=extra.get('qq_image_tools_started')==1
+        checks['probe_did_not_change_image_tasks']=before_turns=={key:value.image_turn for key,value in plugin.router.groups.items()}
         checks['legacy_model_flags_removed_before_execution']='return_result' not in args and 'refs' not in args
         checks['model_notice_not_forwarded_to_image_backend']='pending_message' not in args
         checks['pending_notice_still_sent']=len(notices)==1

@@ -27,7 +27,7 @@ from .model_logging import ModelActivityLogger,event_trace,model_operation,count
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.6.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.6.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -306,6 +306,7 @@ class PersonaModelBindings(Star):
         if self.scoped_group(event):
             normalize_chat_image_arguments(getattr(tool,'name',''),tool_args)
             if getattr(tool,'name','') in ('generate_image','generate_selfie'):
+                selected=tool_args.get('use_previous_reference') if isinstance(tool_args,dict) else None
                 if isinstance(tool_args,dict):
                     if self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
                     else:tool_args.pop('use_previous_reference',None)
@@ -313,6 +314,11 @@ class PersonaModelBindings(Star):
                     tool_started(self,event,tool)
                     self.save_context()
                 event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
+                activity=getattr(self,'model_activity',None)
+                if activity:
+                    omni=self.context.get_registered_star('astrbot_plugin_omnidraw').star_cls
+                    reference=event.get_extra('qq_available_image_turn') or event.get_extra('qq_current_image_turn')
+                    activity.emit('image_reference_check',**event_trace(event),purpose='image_reference_selection',selected_previous_reference=selected,available_reference_count=reference.get('reference_count',0) if reference else 0,attached_reference_count=len(omni._get_event_images(event)))
 
     @filter.on_using_llm_tool(priority=1100)
     async def announce_image_generation(self,event: AstrMessageEvent,tool,tool_args):
@@ -447,7 +453,7 @@ class PersonaModelBindings(Star):
         if activity:
             provider=self.context.get_provider_by_id(self.router.settings.get('judge_provider_id'))
             model=provider.get_model() if provider and verdict.get('judged') else 'not_called'
-            next_step='main_reply_pending' if event.is_at_or_wake_command else 'main_reply_not_started' if verdict.get('judged') else 'background_reply_path'
+            next_step='normal_pipeline_eligible' if event.is_at_or_wake_command else 'main_reply_not_started' if verdict.get('judged') else 'background_reply_path'
             activity.emit('routing_done',**trace,model=model,route=verdict['route'],reason=verdict['reason'],seconds=verdict.get('judge_seconds',0),error_type=verdict.get('error_type'),next=next_step)
 
     @filter.on_llm_request(priority=-1200)

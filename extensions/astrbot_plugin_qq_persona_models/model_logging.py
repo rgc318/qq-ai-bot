@@ -97,7 +97,8 @@ class ModelActivityLogger:
                  'kind','provider','model','seconds','first_output_seconds','stream','outcome',
                  'error_type','http_status','tool_calls','input_tokens','output_tokens',
                  'context_messages','image_count','tool_count','input_chars','node','mode',
-                 'reason','next','route','image_tool_calls','configured_timeout_seconds'}
+                 'reason','next','route','image_tool_calls','configured_timeout_seconds',
+                 'selected_previous_reference','available_reference_count','attached_reference_count'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}
         for k,v in list(row.items()):
             if isinstance(v,str):row[k]=v.replace('\n',' ').replace('\r',' ')[:240]
@@ -109,6 +110,7 @@ class ModelActivityLogger:
                         'success':'调用完成','error':'调用失败','cancelled':'调用取消或超时中断',
                         'request_ready':'正文请求已准备','routing_done':'接话路由结束',
                         'reply_done':'本轮模型回复结束','sent':'消息发送完成'}
+                labels['image_reference_check']='绘图参考图检查'
                 if state=='routing_done' and row.get('next')=='main_reply_not_started':
                     labels[state]='判断超时，未进入正文生成' if row.get('error_type')=='TimeoutError' else '判断失败，未进入正文生成' if row.get('reason')=='judge_unavailable' else '本条未进入正文生成'
                 if state=='routing_done' and str(row.get('reason','')).startswith('context_review_'):labels[state]='判断未完成，转主模型核对上下文'
