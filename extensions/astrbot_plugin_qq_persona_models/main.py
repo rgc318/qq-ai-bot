@@ -25,7 +25,7 @@ from .group_permission_compat import GroupPermissionAdapter
 from .conversation_context import dialogue_snapshot,attach_dialogue_context
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.4.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.4.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -225,7 +225,8 @@ class PersonaModelBindings(Star):
             probe.context,probe.config=self.context,self.config
             probe.router=ReplyRouter(dict(self.router.settings),self.judge_reply)
             mode='force_fallback' if payload.get('force_notice_fallback') else True
-            return jsonify({'status':'ok','data':await verify_native_meme_request(self.context,probe,True,'帮我画一只戴厨师帽的小鲸鱼，准备把白米饭炒成蛋炒饭。',True,mode)})
+            message=str(payload.get('message') or '帮我画一只戴厨师帽的小鲸鱼，准备把白米饭炒成蛋炒饭。')[:1600]
+            return jsonify({'status':'ok','data':await verify_native_meme_request(self.context,probe,True,message,True,mode)})
         if payload.get('performance_only'):
             from .integration_checks import verify_performance_request
             probe=object.__new__(type(self))
@@ -428,7 +429,10 @@ class PersonaModelBindings(Star):
         notice=self.config.get('image_pending_notice',{})
         model_notice=notice.get('enabled',True) and notice.get('model_generated',True)
         prepare_chat_image_tools(request,model_notice=model_notice)
-        if model_notice and getattr(request,'func_tool',None) and {'generate_image','generate_selfie'}.intersection(request.func_tool.names()):
+        image_tools_available=bool(getattr(request,'func_tool',None) and {'generate_image','generate_selfie'}.intersection(request.func_tool.names()))
+        if image_tools_available:
+            request.system_prompt=(request.system_prompt or '')+'\n[图片任务执行]\n用户要求实际生成或修改图片时，必须在本轮真实调用 generate_image 或 generate_selfie，不能只回复“我来画/我来改”就结束。提供或引用图片后要求“转换成人形、拟人化、换成某种风格、替换角色”等也是实际改图请求，不要求用户再次说“生成图片”。讨论改图方法、询问能力、明确不执行或还缺必要信息时，不应擅自调用。普通文字回复不会排队、不会在后台自动续做；只有实际工具调用才启动图片任务。\n'
+        if model_notice and image_tools_available:
             request.system_prompt=(request.system_prompt or '')+'\n[图片任务开工对白]\n调用 generate_image 或 generate_selfie 时，必须在同一次工具参数里填写 pending_message：用当前人格结合本次要求，自然回应一句你准备怎么画或怎么改。不要复用固定报到句，不要把改图一概称为拍照，不说已经完成，不承诺用时。程序会在生图开始前发送这句话；不必为这句开工对白另调 send_message_to_user。绘图描述仍放在 prompt/action 等原参数中，不能用 pending_message 替代。\n'
         self.attach_history_catalog(event,request)
         apply_quote_image_policy(event,request)
