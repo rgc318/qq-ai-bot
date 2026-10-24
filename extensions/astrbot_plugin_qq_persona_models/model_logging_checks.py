@@ -2,7 +2,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from .model_logging import ModelActivityLogger,model_operation,event_trace
+from .model_logging import ModelActivityLogger,model_operation,event_trace,scoped_iterator,_CURRENT,_ACTIVE
 from uuid import uuid4
 
 
@@ -53,6 +53,27 @@ async def verify_model_logging():
         values=[v async for v in provider.text_chat_stream()]
         checks['stream_not_buffered_or_changed']=len(values)==2 and values[0].completion_text=='chunk'
         checks['stream_first_output_logged']=any(r['event']=='first_output' for r in rows) and 'first_output_seconds' in rows[-1]
+        cleanup=[]
+        async def source():
+            try:
+                await provider.text_chat()
+                yield 'first'
+                yield 'second'
+            finally:cleanup.append(_CURRENT.get().get('purpose'))
+        iterator=scoped_iterator(source(),'main_reply',{'trace':'cross-task-close'})
+        value=await anext(iterator)
+        checks['runner_yield_does_not_leak_context']=value=='first' and not _CURRENT.get() and not _ACTIVE.get()
+        await asyncio.create_task(iterator.aclose())
+        checks['runner_close_in_another_task']=cleanup==['main_reply'] and not _CURRENT.get() and not _ACTIVE.get()
+        stream=provider.text_chat_stream()
+        await anext(stream)
+        checks['provider_stream_yield_does_not_leak_context']=not _ACTIVE.get()
+        await asyncio.create_task(stream.aclose())
+        checks['provider_stream_close_in_another_task']=not observer.active and not _ACTIVE.get()
+        namespace={'__name__':'data.plugins.astrbot_plugin_livingmemory.trace_test','provider':provider}
+        exec('async def memory_call():\n    return await provider.text_chat()',namespace)
+        with model_operation('main_reply',{'trace':'memory-child'}):await namespace['memory_call']()
+        checks['memory_purpose_overrides_parent_label']=rows[-1]['purpose']=='memory_processing'
         async def run(trace,delay):
             with model_operation('main_reply',{'trace':trace}):await provider.text_chat(delay=delay,model='override-'+trace)
         await asyncio.gather(run('A',.03),run('B',.015))

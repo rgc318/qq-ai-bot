@@ -147,7 +147,7 @@ async def verify_performance_request(context,probe,call_model=False):
     return result
 
 
-async def verify_native_meme_request(context,probe,call_model=False,message_text='发个开心的表情包',direct=False,image_notice=False):
+async def verify_native_meme_request(context,probe,call_model=False,message_text='发个开心的表情包',direct=False,image_notice=False,early_close=False):
     """Use native construction, existing history and ordered hooks; never run tools/send/save history."""
     from dataclasses import replace
     from .meme_intent import wants_existing_meme
@@ -221,7 +221,12 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
     report['history_serialized_chars']=len(__import__('json').dumps(req.contexts or [],ensure_ascii=False))
     if call_model:
         start=time.monotonic()
-        responses=[response async for response in runner._iter_llm_responses()]
+        if early_close:
+            import asyncio
+            iterator=runner._iter_llm_responses()
+            try:responses=[await anext(iterator)]
+            finally:await asyncio.create_task(iterator.aclose())
+        else:responses=[response async for response in runner._iter_llm_responses()]
         response=responses[-1]
         if image_notice:
             from copy import deepcopy
@@ -250,7 +255,10 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
             runner.agent_hooks=SimpleNamespace(on_tool_start=MAIN_AGENT_HOOKS.on_tool_start,on_tool_end=end_noop)
             async for _ in runner._handle_function_tools(req,response):pass
             report.update(primary_model_calls=1,notice_model_calls=event.get_extra('qq_notice_model_calls') or 0,notice_source=event.get_extra('qq_image_notice_source'),seconds=round(time.monotonic()-start,2),image_tool_calls=calls,captured_notices=captured,image_generations=0,native_tool_executions=executions,schema_has_notice=all('pending_message' in req.func_tool.get_tool(c['tool']).parameters.get('properties',{}) for c in calls),raw_response_has_notice='pending_message' in str(response.raw_completion),system_notice_present='图片任务开工对白' in req.system_prompt,execution_rule_present='[图片任务执行]' in req.system_prompt,response_text=response.completion_text or '')
-            report['passed']=bool(calls) and len(captured)==1 and bool(executions) and all(e['helper_fields_removed'] and e['notice_sent_before_execution'] for e in executions)
+            if early_close:
+                from .model_logging import _CURRENT,_ACTIVE
+                report['cross_task_close_clean']=not _CURRENT.get() and not _ACTIVE.get()
+            report['passed']=bool(calls) and len(captured)==1 and bool(executions) and all(e['helper_fields_removed'] and e['notice_sent_before_execution'] for e in executions) and (not early_close or report['cross_task_close_clean'])
             return report
         memes=context.get_registered_star('meme_manager').star_cls
         prepared=await memes.compat_prepare_message(event,response.completion_text or '')

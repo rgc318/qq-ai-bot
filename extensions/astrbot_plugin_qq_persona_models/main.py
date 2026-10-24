@@ -26,7 +26,7 @@ from .conversation_context import dialogue_snapshot,attach_dialogue_context
 from .model_logging import ModelActivityLogger,event_trace,model_operation,count_image_parts
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.5.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.5.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -235,7 +235,7 @@ class PersonaModelBindings(Star):
             probe.router=ReplyRouter(dict(self.router.settings),self.judge_reply)
             mode='force_fallback' if payload.get('force_notice_fallback') else True
             message=str(payload.get('message') or '帮我画一只戴厨师帽的小鲸鱼，准备把白米饭炒成蛋炒饭。')[:1600]
-            return jsonify({'status':'ok','data':await verify_native_meme_request(self.context,probe,True,message,True,mode)})
+            return jsonify({'status':'ok','data':await verify_native_meme_request(self.context,probe,True,message,True,mode,early_close=bool(payload.get('early_close')))})
         if payload.get('performance_only'):
             from .integration_checks import verify_performance_request
             probe=object.__new__(type(self))

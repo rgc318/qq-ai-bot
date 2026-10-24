@@ -39,6 +39,26 @@ def model_operation(purpose,trace=None):
     finally:_CURRENT.reset(token)
 
 
+async def scoped_iterator(source,purpose,trace=None):
+    """Scope each pull/close, never hold a ContextVar token across a yield.
+
+    Consumers may stop early and Python can finalize the generator in another
+    task. Keeping a token live across yield leaks it into the consumer and
+    makes reset fail when finalization happens in another Context.
+    """
+    iterator=source.__aiter__()
+    try:
+        while True:
+            with model_operation(purpose,trace):
+                try:value=await anext(iterator)
+                except StopAsyncIteration:return
+            yield value
+    finally:
+        close=getattr(iterator,'aclose',None)
+        if close:
+            with model_operation(purpose,trace):await close()
+
+
 def _caller_purpose(kind):
     frame=inspect.currentframe()
     try:
@@ -131,8 +151,10 @@ class ModelActivityLogger:
     def begin(self,instance,kwargs,kind,stream):
         meta={**_CURRENT.get(),**self.identity(instance,kwargs,kind)}
         if not meta.get('trace'):meta['trace']='bg-'+uuid4().hex[:12]
+        inferred=_caller_purpose(kind)
         if kind=='image':meta['purpose']='image_generation'
-        elif not meta.get('purpose') or kind=='embedding':meta['purpose']=_caller_purpose(kind)
+        elif inferred in ('memory_processing','memory_embedding','background_reply_judge','vision_caption'):meta['purpose']=inferred
+        elif not meta.get('purpose') or kind=='embedding':meta['purpose']=inferred
         meta['call']=uuid4().hex[:10];meta['stream']=stream
         if kind=='text':
             meta['context_messages']=len(kwargs.get('contexts') or [])
@@ -190,25 +212,37 @@ class ModelActivityLogger:
                     if key in _ACTIVE.get():
                         async for value in original(instance,*args,**kwargs):yield value
                         return
-                    token=_ACTIVE.set(_ACTIVE.get()|{key});record=self.begin(instance,kwargs,kind,True)
+                    record=self.begin(instance,kwargs,kind,True)
+                    iterator=original(instance,*args,**kwargs).__aiter__()
                     heartbeat=asyncio.create_task(self.waiting(record));state='cancelled';error=None
                     try:
-                        async for value in original(instance,*args,**kwargs):
+                        while True:
+                            token=_ACTIVE.set(_ACTIVE.get()|{key})
+                            try:
+                                try:value=await anext(iterator)
+                                except StopAsyncIteration:state='success';break
+                            finally:_ACTIVE.reset(token)
                             record['result']=value
                             if record['first'] is None:
                                 record['first']=round(time.monotonic()-record['started'],3)
                                 self.emit('first_output',**record['meta'],first_output_seconds=record['first'])
                             yield value
-                        state='success'
                     except asyncio.CancelledError as exc:error=exc;raise
                     except Exception as exc:state='error';error=exc;raise
                     finally:
-                        heartbeat.cancel()
-                        try:await heartbeat
-                        except (asyncio.CancelledError,Exception):pass
-                        try:self.finish(record,state,error)
-                        except Exception:self.active.pop(record['meta']['call'],None)
-                        finally:_ACTIVE.reset(token)
+                        try:
+                            close=getattr(iterator,'aclose',None)
+                            if close:
+                                token=_ACTIVE.set(_ACTIVE.get()|{key})
+                                try:await close()
+                                except Exception as exc:state='error';error=exc;raise
+                                finally:_ACTIVE.reset(token)
+                        finally:
+                            heartbeat.cancel()
+                            try:await heartbeat
+                            except (asyncio.CancelledError,Exception):pass
+                            try:self.finish(record,state,error)
+                            except Exception:self.active.pop(record['meta']['call'],None)
                 return stream
             @functools.wraps(original)
             async def call(instance,*args,**kwargs):
@@ -253,8 +287,10 @@ class ModelActivityLogger:
                 @functools.wraps(original)
                 async def wrapped(instance,*a,**kw):
                     event=getattr(getattr(instance.run_context,'context',None),'event',None)
-                    with model_operation(purpose,event_trace(event) if event else None):
-                        async for value in original(instance,*a,**kw):yield value
+                    iterator=scoped_iterator(original(instance,*a,**kw),purpose,event_trace(event) if event else None)
+                    try:
+                        async for value in iterator:yield value
+                    finally:await iterator.aclose()
                 return wrapped
             return build
         self.patch(ToolLoopAgentRunner,'_iter_llm_responses',runner_scope('main_reply'))
