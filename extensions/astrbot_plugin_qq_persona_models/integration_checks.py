@@ -178,6 +178,7 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
     msg.raw_message={}
     event=NoSendEvent(msg.message_str,msg,PlatformMetadata(name='aiocqhttp',description='isolated diagnostic',id='qq-snowluma'),group)
     event.set_extra('qq_diagnostic',True)
+    event.set_extra('qq_image_followup_probe',probe)
     event.is_wake=True
     event.is_at_or_wake_command=direct
     policy=context.get_registered_star('astrbot_plugin_user_policy').star_cls
@@ -215,8 +216,11 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
         # close is harmless after await and prevents a warning if a hook failed.
         if result.reset_coro:result.reset_coro.close()
     runner=result.agent_runner
-    report={'stages':stages,'live_anchor_present':had_anchor,'old_anchor_injected':bool(event.get_extra('qq_semantic_reference_attached')),'history_messages':len(req.contexts or []),'history_tool_calls':sum(bool(x.get('tool_calls')) for x in req.contexts or []),'model':result.provider.get_model(),'final_meme_prompt':'<!-- meme_manager_prompt:start -->' in (req.system_prompt or ''),'final_stock_policy':'本次现成表情请求' in (req.system_prompt or ''),'generation_tools_absent':not {'generate_image','generate_selfie','generate_video'}.intersection(req.func_tool.names() if req.func_tool else []),'qq_messages_sent':0}
+    report={'stages':stages,'live_anchor_present':had_anchor,'old_anchor_injected':bool(event.get_extra('qq_semantic_reference_attached')),'history_messages':len(req.contexts or []),'history_tool_calls':sum(bool(x.get('tool_calls')) for x in req.contexts or []),'model':result.provider.get_model(),'final_meme_prompt':'<!-- meme_manager_prompt:start -->' in (req.system_prompt or ''),'final_stock_policy':'本次现成表情请求' in (req.system_prompt or ''),'generation_tools_absent':not {'generate_image','generate_selfie','generate_video'}.intersection(req.func_tool.names() if req.func_tool else []),'qq_messages_sent':0,'context_followup_reason':(event.get_extra('qq_semantic_decision') or {}).get('reason'),'image_reference_recovered':bool(event.get_extra('qq_image_followup_reference')) and bool(getattr(req,'image_urls',None))}
     report['performance']=event.get_extra('qq_performance')
+    if probe.router.context(group).image_turn:
+        report['prior_image_status']=probe.router.context(group).image_turn['status']
+        report['prior_reference_count']=probe.router.context(group).image_turn['reference_count']
     report['history_user_turns']=sum(x.get('role')=='user' for x in req.contexts or [])
     report['history_serialized_chars']=len(__import__('json').dumps(req.contexts or [],ensure_ascii=False))
     if call_model:
@@ -242,11 +246,13 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
             calls=[]
             for name,args in zip(response.tools_call_name,response.tools_call_args):
                 if name not in ('generate_image','generate_selfie'):continue
-                calls.append({'tool':name,'model_notice':args.get('pending_message')})
+                calls.append({'tool':name,'model_notice':args.get('pending_message'),'previous_reference_choice':args.get('use_previous_reference')})
             executions=[]
             class DryExecutor:
                 async def execute(self,tool,run_context,**arguments):
-                    executions.append({'tool':tool.name,'notice_sent_before_execution':bool(captured),'helper_fields_removed':not {'pending_message','return_result','refs'}.intersection(arguments)})
+                    omni=context.get_registered_star('astrbot_plugin_omnidraw').star_cls
+                    refs=omni._get_event_images(event)
+                    executions.append({'tool':tool.name,'notice_sent_before_execution':bool(captured),'helper_fields_removed':not {'pending_message','return_result','refs','use_previous_reference'}.intersection(arguments),'reference_count':len(refs)})
                     yield CallToolResult(content=[TextContent(type='text',text='诊断：没有执行生图或发送图片。')])
             async def end_noop(*args):pass
             # Use the real runner's argument filtering and before-tool hooks,
@@ -254,6 +260,7 @@ async def verify_native_meme_request(context,probe,call_model=False,message_text
             runner.tool_executor=DryExecutor()
             runner.agent_hooks=SimpleNamespace(on_tool_start=MAIN_AGENT_HOOKS.on_tool_start,on_tool_end=end_noop)
             async for _ in runner._handle_function_tools(req,response):pass
+            if event.get_extra('qq_context_image_restored'):report['image_reference_recovered']=True
             report.update(primary_model_calls=1,notice_model_calls=event.get_extra('qq_notice_model_calls') or 0,notice_source=event.get_extra('qq_image_notice_source'),seconds=round(time.monotonic()-start,2),image_tool_calls=calls,captured_notices=captured,image_generations=0,native_tool_executions=executions,schema_has_notice=all('pending_message' in req.func_tool.get_tool(c['tool']).parameters.get('properties',{}) for c in calls),raw_response_has_notice='pending_message' in str(response.raw_completion),system_notice_present='图片任务开工对白' in req.system_prompt,execution_rule_present='[图片任务执行]' in req.system_prompt,response_text=response.completion_text or '')
             if early_close:
                 from .model_logging import _CURRENT,_ACTIVE

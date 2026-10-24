@@ -17,26 +17,8 @@ async def hydrate_history(context, router, event, persona):
     if ctx.last_ai or ctx.hydration_attempted:
         return False
     ctx.hydration_attempted=True
-    manager=context.conversation_manager
-    umo=event.unified_msg_origin
-    decision=event.get_extra('user_policy_decision')
-    cid=None
-    policy=context.get_registered_star('astrbot_plugin_user_policy')
-    isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
-    if isolation and decision:
-        scope,_=isolation._scope(decision)
-        entry=isolation.bindings.get('bindings',{}).get(scope,{})
-        if decision.memory_isolation:
-            cid=entry.get('personas',{}).get(persona or '__astrbot_default__')
-        else:
-            cid=entry.get('shared_conversation_id')
-    if not cid:
-        cid=await manager.get_curr_conversation_id(umo)
-    if not cid:
-        return False
-    conv=await manager.get_conversation(umo,cid)
-    if conv is None or str(getattr(conv,'persona_id','') or '') != persona:
-        return False
+    conv=await read_persona_conversation(context,event,persona)
+    if conv is None:return False
     age=time.time()-float(conv.updated_at)
     if age < -5 or age > float(router.settings.get('followup_window_seconds',1800)):
         return False
@@ -52,3 +34,28 @@ async def hydrate_history(context, router, event, persona):
     ctx.messages.extend(rows[max(0,last-23):last+1])
     router.stats['history_recovered']+=1
     return True
+
+
+async def read_persona_conversation(context,event,persona):
+    manager=context.conversation_manager
+    umo=event.unified_msg_origin
+    decision=event.get_extra('user_policy_decision')
+    cid=None
+    policy=context.get_registered_star('astrbot_plugin_user_policy')
+    isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
+    if isolation and decision:
+        scope,_=isolation._scope(decision)
+        entry=isolation.bindings.get('bindings',{}).get(scope,{})
+        if decision.memory_isolation:
+            cid=entry.get('personas',{}).get(persona or '__astrbot_default__')
+            if not cid:return None
+        else:
+            cid=entry.get('shared_conversation_id')
+    if not cid:
+        cid=await manager.get_curr_conversation_id(umo)
+    if not cid:
+        return None
+    conv=await manager.get_conversation(umo,cid)
+    if conv is None or str(getattr(conv,'persona_id','') or '') != persona:
+        return None
+    return conv

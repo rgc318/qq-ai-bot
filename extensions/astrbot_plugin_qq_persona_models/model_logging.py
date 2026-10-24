@@ -111,6 +111,7 @@ class ModelActivityLogger:
                         'reply_done':'本轮模型回复结束','sent':'消息发送完成'}
                 if state=='routing_done' and row.get('next')=='main_reply_not_started':
                     labels[state]='判断超时，未进入正文生成' if row.get('error_type')=='TimeoutError' else '判断失败，未进入正文生成' if row.get('reason')=='judge_unavailable' else '本条未进入正文生成'
+                if state=='routing_done' and str(row.get('reason','')).startswith('context_review_'):labels[state]='判断未完成，转主模型核对上下文'
                 method=logger.warning if state in ('error','cancelled') else logger.info
                 method('[AI调用] %s %s',labels.get(state,state),json.dumps(row,ensure_ascii=False,separators=(',',':')))
         except Exception:

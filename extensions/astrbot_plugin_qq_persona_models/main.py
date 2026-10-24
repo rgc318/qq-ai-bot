@@ -24,14 +24,17 @@ from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
 from .group_permission_compat import GroupPermissionAdapter
 from .conversation_context import dialogue_snapshot,attach_dialogue_context
 from .model_logging import ModelActivityLogger,event_trace,model_operation,count_image_parts
+from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.5.1")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.6.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.router = ReplyRouter(dict(config.get("reply_conditions", {})), self.judge_reply)
+        follow=config.get('contextual_image_followup',{})
+        self.router.settings.update(image_context_enabled=follow.get('enabled',True),image_followup_window_seconds=follow.get('window_seconds',86400),image_followup_fallback=follow.get('fallback_to_main',True))
         self.image_upload_adapter=ImageUploadAdapter(dict(config.get('image_upload_compat',{})))
         self.image_quote_adapter=ImageQuoteAdapter(self.scoped_group)
         self.group_permission_adapter=GroupPermissionAdapter(lambda:self.router.settings.get('allowed_groups',[]))
@@ -218,6 +221,23 @@ class PersonaModelBindings(Star):
         if payload.get('model_logging_only'):
             from .model_logging_checks import verify_model_logging,verify_live_model_logging
             return jsonify({'status':'ok','data':await verify_live_model_logging(self) if payload.get('call_model') else await verify_model_logging()})
+        if payload.get('image_followup_only'):
+            from .image_followup_checks import verify_image_followup
+            return jsonify({'status':'ok','data':await verify_image_followup()})
+        if payload.get('image_followup_model_only'):
+            from tempfile import TemporaryDirectory
+            from .integration_checks import verify_native_meme_request
+            probe=object.__new__(type(self));probe.context,probe.config=self.context,self.config
+            probe.router=ReplyRouter(dict(self.router.settings),self.judge_reply);probe.chat_history_store=None
+            if payload.get('simulate_judge_timeout'):
+                async def timeout(_):raise asyncio.TimeoutError()
+                probe.router.judge=timeout
+            with TemporaryDirectory(dir=self.cache_path.parent,prefix='followup-check-') as directory:
+                probe.cache_path=Path(directory)/'reply_context.json'
+                report=await verify_native_meme_request(self.context,probe,True,str(payload.get('message') or '图呢')[:1200],bool(payload.get('direct')),True,early_close=True)
+                report['simulated_judge_timeout']=bool(payload.get('simulate_judge_timeout'))
+                if payload.get('expect_image_call') is False:report['passed']=not report['image_tool_calls'] and not report['native_tool_executions'] and report['cross_task_close_clean']
+                return jsonify({'status':'ok','data':report})
         if payload.get('group_permissions_only'):
             from .group_permission_checks import verify_group_permissions
             return jsonify({'status':'ok','data':await verify_group_permissions(self)})
@@ -286,6 +306,12 @@ class PersonaModelBindings(Star):
         if self.scoped_group(event):
             normalize_chat_image_arguments(getattr(tool,'name',''),tool_args)
             if getattr(tool,'name','') in ('generate_image','generate_selfie'):
+                if isinstance(tool_args,dict):
+                    if self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
+                    else:tool_args.pop('use_previous_reference',None)
+                if self.router.settings.get('image_context_enabled',True) and not event.get_extra('qq_diagnostic'):
+                    tool_started(self,event,tool)
+                    self.save_context()
                 event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
 
     @filter.on_using_llm_tool(priority=1100)
@@ -380,8 +406,10 @@ class PersonaModelBindings(Star):
             self.router.groups.pop(group,None)
             ctx=self.router.context(group)
         ctx.scope=scope
+        event.set_extra('qq_reply_scope',scope)
         try:
             await hydrate_history(self.context,self.router,event,persona)
+            if self.router.settings.get('image_context_enabled',True):await hydrate_image_turn(self,event,ctx,persona)
         except Exception as exc:
             logger.warning('[QQ回复条件] 会话恢复失败，类型=%s',type(exc).__name__)
         from astrbot.api.message_components import At, AtAll, Reply, Plain
@@ -401,6 +429,8 @@ class PersonaModelBindings(Star):
         with model_operation('reply_judge',{**trace,'configured_timeout_seconds':self.router.settings.get('judge_timeout_seconds',8)}):
             verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
         event.set_extra('qq_semantic_decision',verdict)
+        reference=verdict.get('reference')
+        if reference and reference.get('image_activity') and not wants_existing_meme(event.get_message_str()):event.set_extra('qq_image_followup_reference',reference)
         settings=self.config.get('conversation_context',{})
         if settings.get('enabled',True):
             snapshot=dialogue_snapshot(list(ctx.messages),getattr(event.message_obj,'message_id',''),self.router.clock(),settings.get('messages',12),settings.get('chars',2400))
@@ -427,6 +457,9 @@ class PersonaModelBindings(Star):
         if not group:
             return
         await self.capture_chat_history(event,request)
+        if self.router.settings.get('image_context_enabled',True):
+            await capture_turn(self,event,request)
+            if not wants_existing_meme(event.get_message_str()):attach_followup(self,event,request)
         self.prepare_performance_context(event,request)
         reference = event.get_extra("qq_semantic_reference")
         if reference and not wants_existing_meme(event.get_message_str()) and not event.get_extra("qq_semantic_reference_attached"):
@@ -448,7 +481,7 @@ class PersonaModelBindings(Star):
         apply_existing_meme_policy(request, event.get_message_str())
         notice=self.config.get('image_pending_notice',{})
         model_notice=notice.get('enabled',True) and notice.get('model_generated',True)
-        prepare_chat_image_tools(request,model_notice=model_notice)
+        prepare_chat_image_tools(request,model_notice=model_notice,contextual_reference=bool(event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count')))
         image_tools_available=bool(getattr(request,'func_tool',None) and {'generate_image','generate_selfie'}.intersection(request.func_tool.names()))
         if image_tools_available:
             request.system_prompt=(request.system_prompt or '')+'\n[图片任务执行]\n用户要求实际生成或修改图片时，必须在本轮真实调用 generate_image 或 generate_selfie，不能只回复“我来画/我来改”就结束。提供或引用图片后要求“转换成人形、拟人化、换成某种风格、替换角色”等也是实际改图请求，不要求用户再次说“生成图片”。讨论改图方法、询问能力、明确不执行或还缺必要信息时，不应擅自调用。普通文字回复不会排队、不会在后台自动续做；只有实际工具调用才启动图片任务。\n'
@@ -456,6 +489,10 @@ class PersonaModelBindings(Star):
             request.system_prompt=(request.system_prompt or '')+'\n[图片任务开工对白]\n调用 generate_image 或 generate_selfie 时，必须在同一次工具参数里填写 pending_message：用当前人格结合本次要求，自然回应一句你准备怎么画或怎么改。不要复用固定报到句，不要把改图一概称为拍照，不说已经完成，不承诺用时。程序会在生图开始前发送这句话；不必为这句开工对白另调 send_message_to_user。绘图描述仍放在 prompt/action 等原参数中，不能用 pending_message 替代。\n'
         self.attach_history_catalog(event,request)
         apply_quote_image_policy(event,request)
+        if event.get_extra('qq_image_followup_prompt'):
+            request.system_prompt=(request.system_prompt or '')+event.get_extra('qq_image_followup_prompt')
+            if event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count'):
+                request.system_prompt+='\n本轮未自动重传旧图到当前附件。若你判断确实要继续修改上述同一张原图，调用图片工具时填写 use_previous_reference=true，由程序恢复原图传给绘图模型；若是独立新图则为false。这个选择参数不会传给图片API。\n'
         snapshot=event.get_extra('qq_dialogue_snapshot')
         if self.config.get('conversation_context',{}).get('enabled',True) and snapshot:
             decision=event.get_extra('user_policy_decision')
@@ -475,9 +512,24 @@ class PersonaModelBindings(Star):
     @filter.on_llm_response(priority=-1300)
     async def log_reply_completion(self,event: AstrMessageEvent,response):
         if not self.scoped_group(event):return
+        if self.router.settings.get('image_context_enabled',True):
+            reply_finished(event,response)
+            self.save_context()
         activity=getattr(self,'model_activity',None)
         if activity:
             activity.emit('reply_done',**event_trace(event),purpose='main_reply',outcome='agent_finished',image_tool_calls=event.get_extra('qq_image_tools_started') or 0,seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3))
+
+    @filter.on_llm_tool_respond(priority=-1200)
+    async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
+        if not self.scoped_group(event) or event.get_extra('qq_diagnostic') or getattr(tool,'name','') not in ('generate_image','generate_selfie'):return
+        turn=event.get_extra('qq_current_image_turn')
+        if turn is not None:
+            ctx=self.router.context(self.scoped_group(event))
+            if ctx.image_turn and ctx.image_turn['id']==turn['id'] and (not event.get_extra('qq_reply_scope') or ctx.scope==event.get_extra('qq_reply_scope')):
+                turn=ctx.image_turn
+                event.set_extra('qq_current_image_turn',turn)
+            turn['status']=result_state(tool_result)
+            self.save_context()
 
     def prepare_performance_context(self,event,request):
         settings=self.config.get('performance',{})

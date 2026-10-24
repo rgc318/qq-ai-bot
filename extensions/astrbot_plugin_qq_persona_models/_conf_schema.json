@@ -1,5 +1,10 @@
 {
   "bindings": {"type":"dict","description":"人格 ID 到 AstrBot Provider ID 的映射","items":{},"default":{"大肥鱼":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017","ChatGPT龙娘":"qq-dragon-sol-low"}},
+  "contextual_image_followup":{"type":"object","description":"从上下文承接图片请求","items":{
+    "enabled":{"type":"bool","description":"保留图片会话的真实执行状态和参考图，供模型理解后续追问","default":true},
+    "window_seconds":{"type":"int","description":"图片会话关联有效期秒数","default":86400},
+    "fallback_to_main":{"type":"bool","description":"判断超时或退避时，同一原请求者交由主模型结合上下文判断，不直接执行生图","default":true}
+  }},
   "model_logging":{"type":"object","description":"模型调用与消息处理日志","items":{
     "enabled":{"type":"bool","description":"记录模型开始、等待、完成和异常，不打印提示词或密钥","default":true},
     "heartbeat_seconds":{"type":"int","description":"模型仍未返回时首次等待日志的秒数","default":10},
