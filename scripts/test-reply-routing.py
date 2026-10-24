@@ -4,11 +4,15 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
-from types import SimpleNamespace
+from types import SimpleNamespace,ModuleType
 import time
 
 path=Path(__file__).resolve().parents[1]/"extensions"
 sys.path.insert(0,str(path))
+# Exercise the real routing module without loading AstrBot's plugin entrypoint.
+package=ModuleType('astrbot_plugin_qq_persona_models')
+package.__path__=[str(path/'astrbot_plugin_qq_persona_models')]
+sys.modules[package.__name__]=package
 module=__import__('astrbot_plugin_qq_persona_models.reply_routing',fromlist=['ReplyRouter'])
 
 class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -38,6 +42,37 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
         result=await self.router.decide("group","A","介绍一下",explicit=True)
         self.assertEqual(result["route"],"direct")
         self.assertFalse(self.calls)
+
+    async def test_standalone_name_and_honorific_wake_without_judge_or_anchor(self):
+        self.router.settings['aliases']=['小鱼','ChatGPT','GPT','龙娘']
+        for text in ['ChatGPT大人','ChatGPT','GPT老师！','龙娘姐姐？','小鱼在吗']:
+            self.now+=3
+            result=await self.router.decide('group','A',text)
+            self.assertEqual(result['route'],'fast',text)
+            self.assertEqual(result['reason'],'standalone_bot_name_call')
+            self.assertIsNone(result['reference'])
+        self.assertFalse(self.calls)
+
+    async def test_name_discussion_and_quotation_are_not_direct_wake(self):
+        self.router.settings['aliases']=['ChatGPT']
+        self.verdict={'route':'ambient','confidence':0.99}
+        for text in ['我刚才问了ChatGPT','他说“ChatGPT大人”','ChatGPT大人这个称呼真搞笑','别叫ChatGPT大人了']:
+            result=await self.router.decide('group','A',text)
+            self.assertEqual(result['route'],'ambient',text)
+
+    async def test_name_call_respects_other_target_and_burst_limit(self):
+        result=await self.router.decide('group','A','小鱼姐姐',targets_other=True)
+        self.assertEqual(result['route'],'ambient')
+        self.assertEqual((await self.router.decide('group','A','小鱼姐姐'))['route'],'fast')
+        self.assertEqual((await self.router.decide('group','A','小鱼姐姐'))['reason'],'per_user_burst_limit')
+        self.assertFalse(self.calls)
+
+    async def test_name_call_switch_can_restore_semantic_only_behavior(self):
+        self.router.settings['direct_name_call']=False
+        self.verdict={'route':'ambient','confidence':0.99}
+        result=await self.router.decide('group','A','小鱼姐姐')
+        self.assertEqual(result['route'],'ambient')
+        self.assertEqual(len(self.calls),1)
 
     async def test_standalone_meme_request_can_be_judged_without_anchor(self):
         self.verdict={'route':'addressed','confidence':0.96}

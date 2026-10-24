@@ -24,7 +24,7 @@ from .image_quote_compat import ImageQuoteAdapter,apply_quote_image_policy
 from .group_permission_compat import GroupPermissionAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.3.3")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.3.4")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

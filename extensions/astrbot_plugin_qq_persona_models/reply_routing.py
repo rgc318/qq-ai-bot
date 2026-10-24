@@ -35,6 +35,12 @@ _ACK = re.compile(r"^(?:[嗯哦噢好哈呵]+|好的|好吧|收到|知道了|了
 _PRIORITY_HINT = re.compile(r"[?？]|也|再|继续|换|改|给|帮|份|张|解释|为什么|怎么|能否|可以|能不能|这[个段张步样]|那[个段张步样]|上面|刚才|你|吗|呢")
 
 
+def is_name_call(text,aliases):
+    """A whole-message vocative, never an alias substring inside discussion."""
+    suffix=r'(?:大人|老师|同学|大佬|姐姐|小姐姐|妹妹|酱)?(?:在吗|在不在|你好|早上好|晚上好|早安|晚安)?'
+    return any(re.fullmatch(re.escape(str(alias).strip())+suffix+r'[\s，。！？!?~～…]*',str(text or '').strip(),re.I) for alias in aliases if str(alias).strip())
+
+
 @dataclass
 class GroupContext:
     messages: deque = field(default_factory=lambda: deque(maxlen=24))
@@ -167,6 +173,10 @@ class ReplyRouter:
         interval = float(self.settings.get("user_min_interval_seconds",2))
         if now-ctx.fast_times.get(sender,-1e9) < interval:
             return self._result("ambient","per_user_burst_limit")
+        if self.settings.get('direct_name_call',True) and is_name_call(text,aliases):
+            ctx.fast_times[sender]=now
+            while len(ctx.fast_times)>256:del ctx.fast_times[next(iter(ctx.fast_times))]
+            return self._result('fast','standalone_bot_name_call',confidence=1.0,reference=None,judged=False,judge_seconds=0)
         if now < ctx.judge_retry_at:
             return self._result('ambient','judge_backoff',judged=True)
         judged_anchor = {**anchor,"age_seconds":round(max(0,now-anchor["time"]),1)} if anchor else None

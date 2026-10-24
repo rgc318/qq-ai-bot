@@ -22,6 +22,7 @@
   }},
   "reply_conditions": {"type":"object","description":"语境追问快速回复","items":{
     "enabled":{"type":"bool","description":"启用语义判断","default":true},
+    "direct_name_call":{"type":"bool","description":"单独呼叫已配置称呼时直接唤醒，如ChatGPT大人、龙娘姐姐在吗；不改变当前人格","default":true},
     "allowed_groups":{"type":"list","description":"生效群号","default":["347440128"]},
     "judge_provider_id":{"type":"string","description":"语义判断模型","default":"qq-reply-judge-fast","_special":"select_provider"},
     "followup_window_seconds":{"type":"int","description":"AI 对话关联窗口（秒）","default":1800},
