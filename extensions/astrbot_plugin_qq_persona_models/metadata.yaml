@@ -1,6 +1,6 @@
 name: astrbot_plugin_qq_persona_models
 display_name: QQ 人格模型与回复条件
 desc: 人格模型绑定；根据近期 AI 任务识别跨成员追问和追加请求，兼容业镜接话去重。
-version: 1.7.3
+version: 1.8.0
 author: local-deployment
 astrbot_version: ">=4.29.1,<5"

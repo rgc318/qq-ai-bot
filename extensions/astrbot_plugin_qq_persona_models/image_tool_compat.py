@@ -36,7 +36,7 @@ class ImageExecutionGuard:
             if tool.handler is wrapper:tool.handler=original
         self.patches=[]
 
-def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False):
+def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False,indexed_references=False):
     source=getattr(request,'func_tool',None)
     if source is None:
         return
@@ -64,7 +64,14 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
             properties['use_previous_reference']={'type':'boolean','description':'本轮没有新附件，但系统提供了此前图片会话事实。若当前是在承接/修改那张旧图，填true，程序会从同一会话恢复原图给绘图模型；独立创作新图填false。只因存在旧图不能自动沿用。'}
             required=cloned.parameters.setdefault('required',[])
             if 'use_previous_reference' not in required:required.append('use_previous_reference')
+        if indexed_references:
+            properties['reference_ids']={'type':'array','items':{'type':'string'},'maxItems':4,'description':'必须明确选择：改图填本轮附件目录或read_group_message给出的完整图片ID集合；独立新图填[]。不填写文件路径。多图用途写在绘图描述中。'}
+            properties.pop('use_previous_reference',None)
+            cloned.parameters['required']=[k for k in cloned.parameters.get('required',[]) if k!='use_previous_reference']
+            if 'reference_ids' not in cloned.parameters['required']:cloned.parameters['required'].append('reference_ids')
         cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 当前为普通聊天：生成后自动发送图片；参考图由程序从当前消息和引用的图片中自动获取，不填写本地文件路径或插件内部参数。'
+        if indexed_references:
+            cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 生成后自动发送图片。用reference_ids明确选择参考集合，独立新图填[]；先确认所选图的内容与来源，不填写文件路径。'
         if model_notice:
             cloned.description+=' 同一次工具调用中填写 pending_message，程序会在开始生图前先发送这句人格对白，无需另外调用发送消息工具。'
         result.tools.append(cloned)

@@ -1,4 +1,17 @@
 {
+  "multimodal_context":{"type":"object","description":"统一消息与附件上下文","items":{
+    "enabled":{"type":"bool","description":"登记允许群的消息和附件，支持按ID回看；关闭后使用原有短期承接","default":false},
+    "auto_attach":{"type":"bool","description":"同一成员近期唯一相关图片直接附加，不增加选图模型调用","default":true},
+    "auto_attach_seconds":{"type":"int","description":"直接附图窗口秒数，不是素材保存期","default":180},
+    "on_demand_read":{"type":"bool","description":"允许模型按需调用群消息回看、历史看图及文档读取；关闭后仍可直接承接近期唯一图片","default":true},
+    "documents":{"type":"bool","description":"允许按需本地解析文字PDF、DOCX、TXT/MD和CSV/XLSX，不自动进行OCR","default":true},
+    "media_ttl_seconds":{"type":"int","description":"素材副本保存秒数，达到容量限额可能更早淘汰","default":86400},
+    "message_ttl_seconds":{"type":"int","description":"新增消息索引保留秒数，不影响既有长期记忆","default":604800},
+    "messages_per_scope":{"type":"int","description":"每个群/人格策略范围的索引消息上限","default":5000},
+    "catalog_chars":{"type":"int","description":"本轮附件目录字符预算","default":1800},
+    "scope_bytes":{"type":"int","description":"每策略范围素材容量字节","default":134217728},
+    "total_bytes":{"type":"int","description":"全部范围素材总容量字节","default":536870912}
+  }},
   "bindings": {"type":"dict","description":"人格 ID 到 AstrBot Provider ID 的映射","items":{},"default":{"大肥鱼":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017","ChatGPT龙娘":"qq-dragon-sol-low"}},
   "contextual_image_followup":{"type":"object","description":"从上下文承接图片请求","items":{
     "enabled":{"type":"bool","description":"保留图片会话的真实执行状态和参考图，供模型理解后续追问","default":true},

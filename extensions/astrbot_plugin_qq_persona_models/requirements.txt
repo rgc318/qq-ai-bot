@@ -1,0 +1,5 @@
+# Versions already present and verified in the AstrBot deployment.
+Pillow==13.0.0
+pypdf==6.21.0
+python-docx==1.2.0
+openpyxl==3.1.5
