@@ -15,7 +15,7 @@ from astrbot.api import AstrBotConfig
 from .reply_routing import ReplyRouter, JUDGE_SYSTEM_PROMPT, parse_judgment
 from .meme_intent import apply_existing_meme_policy,wants_existing_meme
 from .context_recovery import hydrate_history
-from .image_tool_compat import prepare_chat_image_tools,normalize_chat_image_arguments
+from .image_tool_compat import prepare_chat_image_tools,normalize_chat_image_arguments,IMAGE_GUARD_ERROR
 from .performance_context import plan_history
 from .single_judge import skip_second_judge
 from .image_upload_compat import ImageUploadAdapter
@@ -28,7 +28,7 @@ from .model_logging import ModelActivityLogger,event_trace,model_operation,count
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.1")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.2")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -224,7 +224,7 @@ class PersonaModelBindings(Star):
             return jsonify({'status':'ok','data':await verify_live_model_logging(self) if payload.get('call_model') else await verify_model_logging()})
         if payload.get('image_followup_only'):
             from .image_followup_checks import verify_image_followup
-            return jsonify({'status':'ok','data':await verify_image_followup()})
+            return jsonify({'status':'ok','data':await verify_image_followup(self)})
         if payload.get('tool_prompt_audit_only'):
             from tempfile import TemporaryDirectory
             from .integration_checks import verify_native_meme_request
@@ -320,12 +320,19 @@ class PersonaModelBindings(Star):
             normalize_chat_image_arguments(getattr(tool,'name',''),tool_args)
             if getattr(tool,'name','') in ('generate_image','generate_selfie'):
                 selected=tool_args.get('use_previous_reference') if isinstance(tool_args,dict) else None
-                if isinstance(tool_args,dict):
-                    if self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
-                    else:tool_args.pop('use_previous_reference',None)
-                if self.router.settings.get('image_context_enabled',True) and not event.get_extra('qq_diagnostic'):
-                    tool_started(self,event,tool)
-                    self.save_context()
+                try:
+                    if isinstance(tool_args,dict):
+                        if self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
+                        else:tool_args.pop('use_previous_reference',None)
+                    if self.router.settings.get('image_context_enabled',True) and not event.get_extra('qq_diagnostic'):
+                        tool_started(self,event,tool)
+                        self.save_context()
+                except (ValueError,RuntimeError) as exc:
+                    if not isinstance(tool_args,dict):raise
+                    tool_args[IMAGE_GUARD_ERROR]=str(exc)
+                    activity=getattr(self,'model_activity',None)
+                    if activity:activity.emit('image_guard_rejected',**event_trace(event),purpose='image_reference_selection',outcome='image_not_executed',error_type=type(exc).__name__)
+                    return
                 event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
                 activity=getattr(self,'model_activity',None)
                 if activity:
@@ -341,6 +348,7 @@ class PersonaModelBindings(Star):
         # This field belongs to our request-local schema, not OmniDraw's API.
         # Remove it even when notices were disabled or scope changed mid-flight.
         model_text=args.pop('pending_message',None) if name in ('generate_image','generate_selfie') else None
+        if args.get(IMAGE_GUARD_ERROR):return
         if not settings.get('enabled',True) or not self.scoped_group(event) or name not in ('generate_image','generate_selfie'):
             return
         if str(args.get('return_result',False)).strip().casefold() in ('true','1','yes') or event.get_extra('qq_image_pending_notice_attempted'):
@@ -560,6 +568,9 @@ class PersonaModelBindings(Star):
     @filter.on_llm_tool_respond(priority=-1200)
     async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
         if not self.scoped_group(event) or event.get_extra('qq_diagnostic') or getattr(tool,'name','') not in ('generate_image','generate_selfie'):return
+        if isinstance(tool_args,dict) and tool_args.get(IMAGE_GUARD_ERROR):
+            self.record_dialogue_progress(event,'[图片参数校验未通过，本次未调用图片模型；此前图片任务状态未改变。]','image_tool_status')
+            return
         status=result_state(tool_result)
         summaries={'sent':'[图片工具已报告成功下发图片；这是执行状态，不是图片内容或聊天原话。]',
             'failed':'[图片工具执行失败；这是执行状态，不是聊天原话。]',
@@ -616,8 +627,10 @@ class PersonaModelBindings(Star):
             activity=getattr(self,'model_activity',None)
             if activity:
                 activity.emit('sent',**event_trace(event),seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3),image_tool_calls=event.get_extra('qq_image_tools_started') or 0)
-            self.router.note_ai(group,result.get_plain_text() or "[AI发送了图片或其他内容]", request=event.get_message_str(),sender=str(event.get_sender_id()))
-            self.save_context()
+            scope=event.get_extra('qq_reply_scope')
+            if not scope or self.router.context(group).scope==scope:
+                self.router.note_ai(group,result.get_plain_text() or "[AI发送了图片或其他内容]", request=event.get_message_str(),sender=str(event.get_sender_id()),message_id=str(getattr(event.message_obj,'message_id','') or ''))
+                self.save_context()
             owner=event.get_extra('qq_history_owner')
             store=getattr(self,'chat_history_store',None)
             if owner and store is not None and self.config.get('history_recall',{}).get('enabled',True) and not event.get_extra('qq_diagnostic'):
@@ -768,6 +781,35 @@ class PersonaModelBindings(Star):
         checks['progress_respects_persona_scope']=not probe.record_dialogue_progress(progress,'不应串人格','image_notice') and len(ctx.messages)==size
         progress.set_extra('qq_reply_scope',ctx.scope);progress.set_extra('qq_diagnostic',True)
         checks['diagnostic_progress_is_not_persisted']=not probe.record_dialogue_progress(progress,'诊断不写入','image_notice') and len(ctx.messages)==size
+        # Reproduce an initially unclassified context-review request, followed
+        # by an actual sent reply. The next turn must not call the judge again.
+        now=[1000.0];judge_calls=[]
+        async def should_not_judge(payload):
+            judge_calls.append(True)
+            return {'route':'ambient','recipient':'unclear','confidence':0.99}
+        confirmed=object.__new__(type(self));confirmed.context,confirmed.config=self.context,self.config
+        confirmed.router=ReplyRouter(dict(self.router.settings),should_not_judge,clock=lambda:now[0])
+        reviewed=SimulatedEvent('confirmed-user','你是谁')
+        reviewed.message_obj.message_id='reviewed-original';reviewed.set_extra('qq_diagnostic',True)
+        current=confirmed.router.context(group)
+        current.scope=reviewed.unified_msg_origin+'|'+confirmed.routing_persona(reviewed)
+        current.hydration_attempted=current.image_hydration_attempted=True
+        reviewed.set_extra('qq_reply_scope',current.scope)
+        current.messages.append({'role':'user','sender':reviewed.sender,'text':reviewed.text,'time':now[0],
+            'message_id':reviewed.message_obj.message_id,'directed_to_bot':False,'targets_other':False})
+        now[0]+=8
+        reviewed.result=MessageEventResult().message('我是这里的 AI 群聊伙伴。').set_result_content_type(ResultContentType.LLM_RESULT)
+        await confirmed.track_completed_reply(reviewed)
+        checks['sent_review_confirms_exact_user_turn']=current.messages[-2]['directed_to_bot'] is True
+        now[0]+=16
+        next_turn=SimulatedEvent(reviewed.sender,'你画一个正常版本的头像')
+        next_turn.message_obj.message_id='reviewed-followup';next_turn.set_extra('qq_diagnostic',True)
+        await confirmed.route_contextual_request(next_turn)
+        checks['confirmed_review_followup_skips_judge']=next_turn.is_at_or_wake_command and next_turn.get_extra('qq_semantic_decision')['reason']=='same_speaker_dialogue' and not judge_calls
+        previous=dict(current.last_ai);late=SimulatedEvent(reviewed.sender,'旧人格迟到回复')
+        late.result=reviewed.result;late.set_extra('qq_reply_scope','another-persona');late.set_extra('qq_diagnostic',True)
+        await confirmed.track_completed_reply(late)
+        checks['late_reply_does_not_seed_other_persona']=current.last_ai==previous
         return jsonify({"status":"ok","data":{"checks":checks,"passed":all(checks.values()),"qq_messages_sent":0,"model_calls":0,"judge_mode":"fixture"}})
 
     def bind(self, event):

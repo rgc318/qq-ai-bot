@@ -83,7 +83,7 @@ class ReplyRouter:
             self.groups.popitem(last=False)
         return self.groups[group]
 
-    def note_ai(self, group: str, text: str, *, request: str = "", sender: str = "", pending=False):
+    def note_ai(self, group: str, text: str, *, request: str = "", sender: str = "", pending=False, message_id=""):
         ctx = self.context(group)
         ctx.sequence += 1
         # Capture the original request as well as the answer so "another one"
@@ -91,6 +91,14 @@ class ReplyRouter:
         ctx.last_ai = {"id":f"ai-{ctx.sequence}","time":self.clock(),"status":"pending" if pending else "sent","request":request[:600],"requested_by":sender,"reply":text[:1600]}
         ctx.latest_requests.pop(sender, None)
         if not pending:
+            # A context-review fallback is deliberately not classified as bot-
+            # addressed initially. Only a genuinely sent AI reply confirms it.
+            # Match the exact request, never a newer message by the same user.
+            if message_id and sender:
+                for row in reversed(ctx.messages):
+                    if row.get('role')=='user' and row.get('sender')==sender and str(row.get('message_id',''))==str(message_id):
+                        if not row.get('targets_other'):row['directed_to_bot']=True
+                        break
             ctx.messages.append({"role":"assistant","sender":"bot","name":"AI","requested_by":sender,"time":self.clock(),"text":text[:1000]})
 
     def note_progress(self, group, text, *, sender, kind='progress'):

@@ -1,7 +1,22 @@
 """Keep plugin-only image parameters out of ordinary chat tool requests."""
 from copy import copy,deepcopy
+from functools import wraps
 
 IMAGE_TOOLS={'generate_image','generate_selfie'}
+IMAGE_GUARD_ERROR='_qq_image_guard_error'
+
+
+def guard_image_handler(handler):
+    """Return validation failures from the executor, not a swallowed event hook."""
+    @wraps(handler)
+    def guarded(*args,**kwargs):
+        error=kwargs.pop(IMAGE_GUARD_ERROR,None)
+        if error:
+            async def rejected():
+                return '系统提示：画图未执行（'+str(error)+'）。本次未调用图片模型，也未发送图片。请修正参数或澄清后再决定是否调用；不要声称已完成。'
+            return rejected()
+        return handler(*args,**kwargs)
+    return guarded
 
 def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False):
     source=getattr(request,'func_tool',None)
@@ -14,6 +29,8 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
             result.tools.append(tool)
             continue
         cloned=copy(tool)
+        if callable(getattr(tool,'handler',None)):
+            cloned.handler=guard_image_handler(tool.handler)
         cloned.parameters=deepcopy(tool.parameters)
         properties=cloned.parameters.get('properties',{})
         for key in ('return_result','refs'):

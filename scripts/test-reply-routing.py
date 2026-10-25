@@ -343,6 +343,56 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
 class DialogueContinuityTests(unittest.IsolatedAsyncioTestCase):
     setUp=ReplyRoutingTests.setUp
 
+    def unclassified_turn(self, message_id='review', sender='A', targets_other=False):
+        row={'role':'user','sender':sender,'text':'你是谁','time':self.now,
+             'message_id':message_id,'directed_to_bot':False,'targets_other':targets_other}
+        self.router.context('group').messages.append(row)
+        return row
+
+    async def test_actual_reply_confirms_review_but_pending_does_not(self):
+        row=self.unclassified_turn()
+        self.router.note_ai('group','',sender='A',pending=True,message_id='review')
+        self.assertFalse(row['directed_to_bot'])
+        self.now+=8
+        self.router.note_ai('group','我是 AI',sender='A',message_id='review')
+        self.assertTrue(row['directed_to_bot'])
+        self.now+=16
+        result=await self.router.decide('group','A','你画个头像',message_id='next')
+        self.assertEqual(result['reason'],'same_speaker_dialogue')
+        self.assertFalse(self.calls)
+
+    async def test_sent_reply_confirms_only_exact_original_message(self):
+        original=self.unclassified_turn()
+        newer=self.unclassified_turn('newer')
+        self.router.note_ai('group','回复原问题',sender='A',message_id='review')
+        self.assertTrue(original['directed_to_bot'])
+        self.assertFalse(newer['directed_to_bot'])
+
+    async def test_sent_reply_cannot_confirm_another_sender(self):
+        row=self.unclassified_turn(sender='B')
+        self.router.note_ai('group','回复 A',sender='A',message_id='review')
+        self.assertFalse(row['directed_to_bot'])
+
+    async def test_sent_reply_preserves_explicit_human_target(self):
+        row=self.unclassified_turn(targets_other=True)
+        self.router.note_ai('group','回复',sender='A',message_id='review')
+        self.assertFalse(row['directed_to_bot'])
+
+    async def test_missing_message_id_does_not_guess_latest_turn(self):
+        row=self.unclassified_turn()
+        self.router.note_ai('group','回复',sender='A')
+        self.assertFalse(row['directed_to_bot'])
+
+    async def test_confirmed_review_survives_snapshot_restore(self):
+        self.unclassified_turn()
+        self.router.note_ai('group','我是 AI',sender='A',message_id='review')
+        saved=self.router.snapshot(wall_time=10000)
+        restored=module.ReplyRouter(self.router.settings,self.router.judge,clock=lambda:5000)
+        restored.restore(saved,wall_time=10016)
+        result=await restored.decide('group','A','你画个头像',message_id='next')
+        self.assertEqual(result['reason'],'same_speaker_dialogue')
+        self.assertFalse(self.calls)
+
     async def start_exchange(self):
         self.verdict={'route':'ambient','recipient':'human','silence_requested':False,'confidence':0.99}
         await self.router.decide('group','A','重新生成一下',explicit=True,message_id='original')
