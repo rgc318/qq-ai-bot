@@ -16,7 +16,25 @@ def guard_image_handler(handler):
                 return '系统提示：画图未执行（'+str(error)+'）。本次未调用图片模型，也未发送图片。请修正参数或澄清后再决定是否调用；不要声称已完成。'
             return rejected()
         return handler(*args,**kwargs)
+    guarded._qq_image_guarded=True
     return guarded
+
+
+class ImageExecutionGuard:
+    """Guard the tool actually passed to native hooks, including unwrapped ones."""
+    def __init__(self):self.patches=[]
+
+    def install(self,tool):
+        handler=getattr(tool,'handler',None)
+        if callable(handler) and not getattr(handler,'_qq_image_guarded',False):
+            wrapper=guard_image_handler(handler)
+            tool.handler=wrapper
+            self.patches.append((tool,handler,wrapper))
+
+    def restore(self):
+        for tool,original,wrapper in reversed(self.patches):
+            if tool.handler is wrapper:tool.handler=original
+        self.patches=[]
 
 def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False):
     source=getattr(request,'func_tool',None)

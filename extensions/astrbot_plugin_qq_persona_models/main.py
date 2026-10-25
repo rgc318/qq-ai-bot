@@ -15,7 +15,8 @@ from astrbot.api import AstrBotConfig
 from .reply_routing import ReplyRouter, JUDGE_SYSTEM_PROMPT, parse_judgment
 from .meme_intent import apply_existing_meme_policy,wants_existing_meme
 from .context_recovery import hydrate_history
-from .image_tool_compat import prepare_chat_image_tools,normalize_chat_image_arguments,IMAGE_GUARD_ERROR
+from .image_tool_compat import prepare_chat_image_tools,normalize_chat_image_arguments,IMAGE_GUARD_ERROR,ImageExecutionGuard
+from .recent_uploads import remember_upload,attach_recent_upload
 from .performance_context import plan_history
 from .single_judge import skip_second_judge
 from .image_upload_compat import ImageUploadAdapter
@@ -28,7 +29,7 @@ from .model_logging import ModelActivityLogger,event_trace,model_operation,count
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.2")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.7.3")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -40,6 +41,7 @@ class PersonaModelBindings(Star):
         self.image_quote_adapter=ImageQuoteAdapter(self.scoped_group)
         self.group_permission_adapter=GroupPermissionAdapter(lambda:self.router.settings.get('allowed_groups',[]))
         self.model_activity=ModelActivityLogger(dict(config.get('model_logging',{})))
+        self.image_execution_guard=ImageExecutionGuard()
         self.chat_history_store=None
         self.history_job=None
         self.history_bootstrap={}
@@ -77,6 +79,7 @@ class PersonaModelBindings(Star):
             self.start_history_bootstrap()
 
     async def terminate(self):
+        self.image_execution_guard.restore()
         self.model_activity.restore()
         self.image_upload_adapter.restore()
         self.image_quote_adapter.restore()
@@ -225,6 +228,9 @@ class PersonaModelBindings(Star):
         if payload.get('image_followup_only'):
             from .image_followup_checks import verify_image_followup
             return jsonify({'status':'ok','data':await verify_image_followup(self)})
+        if payload.get('recent_upload_only'):
+            from .recent_upload_checks import verify_recent_uploads
+            return jsonify({'status':'ok','data':await verify_recent_uploads(self)})
         if payload.get('tool_prompt_audit_only'):
             from tempfile import TemporaryDirectory
             from .integration_checks import verify_native_meme_request
@@ -319,6 +325,8 @@ class PersonaModelBindings(Star):
         if self.scoped_group(event):
             normalize_chat_image_arguments(getattr(tool,'name',''),tool_args)
             if getattr(tool,'name','') in ('generate_image','generate_selfie'):
+                if not hasattr(self,'image_execution_guard'):self.image_execution_guard=ImageExecutionGuard()
+                self.image_execution_guard.install(tool)
                 selected=tool_args.get('use_previous_reference') if isinstance(tool_args,dict) else None
                 try:
                     if isinstance(tool_args,dict):
@@ -338,7 +346,8 @@ class PersonaModelBindings(Star):
                 if activity:
                     omni=self.context.get_registered_star('astrbot_plugin_omnidraw').star_cls
                     reference=event.get_extra('qq_available_image_turn') or event.get_extra('qq_current_image_turn')
-                    activity.emit('image_reference_check',**event_trace(event),purpose='image_reference_selection',selected_previous_reference=selected,available_reference_count=reference.get('reference_count',0) if reference else 0,attached_reference_count=len(omni._get_event_images(event)))
+                    upload=event.get_extra('qq_recent_upload_attached') or {}
+                    activity.emit('image_reference_check',**event_trace(event),purpose='image_reference_selection',selected_previous_reference=selected if reference and event.get_extra('qq_available_image_turn') else False,available_reference_count=reference.get('reference_count',0) if reference else 0,attached_reference_count=len(omni._get_event_images(event)),image_source='recent_upload' if upload else 'current_or_quoted' if event.get_extra('qq_current_image_turn') and not event.get_extra('qq_available_image_turn') else 'previous_task',source_message=upload.get('source_message'))
 
     @filter.on_using_llm_tool(priority=1100)
     async def announce_image_generation(self,event: AstrMessageEvent,tool,tool_args):
@@ -457,6 +466,7 @@ class PersonaModelBindings(Star):
         components = event.get_messages()
         self_id = str(event.get_self_id())
         targets_other = any((isinstance(x, At) and str(x.qq) != self_id) or isinstance(x, AtAll) or (isinstance(x, Reply) and str(x.sender_id) != self_id) for x in components)
+        upload=remember_upload(self,event,ctx,targets_other) if self.router.settings.get('image_context_enabled',True) else None
         only_at=bool(components) and any(isinstance(x,At) and str(x.qq)==self_id for x in components) and all(isinstance(x,At) or isinstance(x,Plain) and not x.text.strip() for x in components)
         if only_at and not targets_other and not event.get_message_str().strip():
             previous=self.router.unanswered_request(group,str(event.get_sender_id()))
@@ -470,6 +480,9 @@ class PersonaModelBindings(Star):
         with model_operation('reply_judge',{**trace,'configured_timeout_seconds':self.router.settings.get('judge_timeout_seconds',8)}):
             verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
         event.set_extra('qq_semantic_decision',verdict)
+        if upload and ctx.messages and ctx.messages[-1].get('message_id')==str(getattr(event.message_obj,'message_id','')):
+            row=ctx.messages[-1]
+            row['text']=(row.get('text') or '')+' [上传图片 '+str(upload['reference_count'])+' 张，消息ID '+upload['message_id']+']'
         reference=verdict.get('reference')
         if reference and reference.get('image_activity') and not wants_existing_meme(event.get_message_str()):event.set_extra('qq_image_followup_reference',reference)
         settings=self.config.get('conversation_context',{})
@@ -500,6 +513,10 @@ class PersonaModelBindings(Star):
             return
         await self.capture_chat_history(event,request)
         if self.router.settings.get('image_context_enabled',True):
+            await attach_recent_upload(self,event,request)
+            upload=event.get_extra('qq_recent_upload_attached') or event.get_extra('qq_recent_upload_missing')
+            activity=getattr(self,'model_activity',None)
+            if upload and activity:activity.emit('recent_upload_reference',**event_trace(event),purpose='image_reference_selection',outcome='attached' if event.get_extra('qq_recent_upload_attached') else 'unavailable_no_old_fallback',image_source='recent_upload',source_message=upload['source_message'],attached_reference_count=upload['reference_count'] if event.get_extra('qq_recent_upload_attached') else 0)
             await capture_turn(self,event,request)
             if not wants_existing_meme(event.get_message_str()):attach_followup(self,event,request)
         self.prepare_performance_context(event,request)
@@ -568,7 +585,8 @@ class PersonaModelBindings(Star):
     @filter.on_llm_tool_respond(priority=-1200)
     async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
         if not self.scoped_group(event) or event.get_extra('qq_diagnostic') or getattr(tool,'name','') not in ('generate_image','generate_selfie'):return
-        if isinstance(tool_args,dict) and tool_args.get(IMAGE_GUARD_ERROR):
+        rejected=any(str(getattr(c,'text','')).startswith('系统提示：画图未执行（') for c in getattr(tool_result,'content',[]) or [])
+        if rejected or isinstance(tool_args,dict) and tool_args.get(IMAGE_GUARD_ERROR):
             self.record_dialogue_progress(event,'[图片参数校验未通过，本次未调用图片模型；此前图片任务状态未改变。]','image_tool_status')
             return
         status=result_state(tool_result)

@@ -11,6 +11,16 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
 
 class ImageToolGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_unwrapped_handler_is_guarded_and_restored(self):
+        async def handler(event,prompt):return prompt
+        tool=SimpleNamespace(handler=handler)
+        guard=module.ImageExecutionGuard();guard.install(tool);installed=tool.handler
+        guard.install(tool)
+        self.assertIs(installed,tool.handler)
+        result=await tool.handler(None,prompt='blocked',**{module.IMAGE_GUARD_ERROR:'missing choice'})
+        self.assertIn('未调用图片模型',result)
+        guard.restore();self.assertIs(tool.handler,handler)
+
     async def test_blocked_coroutine_never_calls_original(self):
         called=[]
         async def handler(event,prompt):called.append(prompt);return 'unexpected'

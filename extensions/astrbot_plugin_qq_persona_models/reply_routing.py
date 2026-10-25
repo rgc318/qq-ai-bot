@@ -61,6 +61,7 @@ class GroupContext:
     judge_retry_at: float = 0.0
     image_turn: dict | None = None
     image_hydration_attempted: bool = False
+    image_uploads: dict = field(default_factory=dict)
 
 
 class ReplyRouter:
@@ -122,6 +123,7 @@ class ReplyRouter:
             anchor=ctx.last_ai
             messages=[{**{k:v for k,v in row.items() if k!='time'},**({'age_seconds':max(0,now-row['time'])} if isinstance(row.get('time'),(int,float)) else {})} for row in ctx.messages]
             groups[group]={'scope':ctx.scope,'sequence':ctx.sequence,'messages':messages,
+                'image_uploads':{s:timed(r) for s,r in ctx.image_uploads.items() if now-r['time']<=600},
                 'last_ai':timed(anchor) if anchor else None,
                 'image_turn':timed(ctx.image_turn) if ctx.image_turn else None,
                 'latest_requests':{s:timed(r) for s,r in ctx.latest_requests.items() if now-r['time'] <= 300}}
@@ -146,6 +148,9 @@ class ReplyRouter:
             def live(record,limit):
                 age=float(record['time'])+elapsed
                 return {**record,'time':self.clock()-age} if 0 <= age <= limit else None
+            for sender,record in list(row.get('image_uploads',{}).items())[-16:]:
+                item=live(record,600)
+                if item and item.get('scope')==ctx.scope:ctx.image_uploads[sender]=item
             anchor=row.get('last_ai')
             if anchor:
                 ctx.last_ai=live(anchor,min(window,120) if anchor.get('status')=='pending' else window)

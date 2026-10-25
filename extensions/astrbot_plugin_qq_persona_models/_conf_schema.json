@@ -3,6 +3,7 @@
   "contextual_image_followup":{"type":"object","description":"从上下文承接图片请求","items":{
     "enabled":{"type":"bool","description":"保留图片会话的真实执行状态和参考图，供模型理解后续追问","default":true},
     "window_seconds":{"type":"int","description":"图片会话关联有效期秒数","default":86400},
+    "recent_upload_seconds":{"type":"int","description":"同一用户先发图再发文字的图片承接窗口，0关闭，最多600秒；不增加识图判断调用","default":180},
     "fallback_to_main":{"type":"bool","description":"判断超时或退避时，同一原请求者交由主模型结合上下文判断，不直接执行生图","default":true}
   }},
   "model_logging":{"type":"object","description":"模型调用与消息处理日志","items":{

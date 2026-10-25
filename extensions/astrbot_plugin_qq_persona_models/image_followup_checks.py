@@ -128,7 +128,7 @@ async def verify_image_followup(plugin=None):
         turn=probe.router.context('G').image_turn;turn['status']='sent'
         extras={'qq_diagnostic':True,'qq_available_image_turn':turn,'qq_current_image_turn':turn}
         async def no_send(*args):sends.append(True)
-        event=SimpleNamespace(get_extra=lambda k,default=None:extras.get(k,default),set_extra=lambda k,v:extras.update({k:v}),get_group_id=lambda:'G',get_sender_id=lambda:'A',get_self_id=lambda:'bot',is_stopped=lambda:False,is_private_chat=lambda:False,send=no_send)
+        event=SimpleNamespace(get_extra=lambda k,default=None:extras.get(k,default),set_extra=lambda k,v:extras.update({k:v}),get_group_id=lambda:'G',get_sender_id=lambda:'A',get_self_id=lambda:'bot',is_stopped=lambda:False,is_private_chat=lambda:False,send=no_send,message_obj=SimpleNamespace(message_id='native-guard-fixture',message=[]))
         context=SimpleNamespace(context=SimpleNamespace(event=event),tool_call_timeout=5)
         args={'prompt':'fixture','pending_message':'不应发送的对白'}
         await probe.normalize_image_arguments(event,guarded,args)
@@ -147,4 +147,29 @@ async def verify_image_followup(plugin=None):
         await probe.normalize_image_arguments(event,guarded,args)
         output=[r async for r in FunctionToolExecutor.execute(guarded,context,**args)]
         checks['executor_allows_explicit_new_image_choice']=calls==['valid new image'] and extras.get('qq_image_tools_started')==1 and not args.get(IMAGE_GUARD_ERROR)
+        # Exercise the native runner, not only direct executor calls. In the
+        # real incident the tool reaching the hook still had its raw handler.
+        from astrbot.core.agent.tool import ToolSet
+        from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        from astrbot.core.provider.entites import ProviderRequest,LLMResponse
+        raw_tool=FunctionTool(name='generate_image',description='fixture',parameters={'type':'object','properties':{'prompt':{'type':'string'}},'required':['prompt']},handler=original_handler)
+        request=ProviderRequest(func_tool=ToolSet(tools=[raw_tool]))
+        runner=ToolLoopAgentRunner()
+        async def start(context,tool,args):
+            await probe.normalize_image_arguments(context.context.event,tool,args)
+            await probe.announce_image_generation(context.context.event,tool,args)
+        async def end(context,tool,args,result):
+            extras['qq_diagnostic']=False
+            try:await probe.track_image_tool_result(context.context.event,tool,args,result)
+            finally:extras['qq_diagnostic']=True
+        context.messages=[]
+        await runner.reset(provider=SimpleNamespace(provider_config={'id':'fixture'}),request=request,run_context=context,tool_executor=FunctionToolExecutor,agent_hooks=SimpleNamespace(on_tool_start=start,on_tool_end=end))
+        before_calls=len(calls)
+        response=LLMResponse(role='assistant',tools_call_name=['generate_image'],tools_call_args=[{'prompt':'must be blocked'}],tools_call_ids=['fixture-missing-choice'])
+        results=[r async for r in runner._handle_function_tools(request,response)]
+        checks['native_runner_blocks_unwrapped_handler']=len(calls)==before_calls and any('本次未调用图片模型' in str(block.content) for r in results for block in r.tool_call_result_blocks or [])
+        checks['native_original_args_preserve_previous_task_state']=turn['status']=='sent'
+        checks['native_runner_installs_execution_guard']=getattr(raw_tool.handler,'_qq_image_guarded',False)
+        probe.image_execution_guard.restore()
+        checks['runtime_guard_is_reversible']=raw_tool.handler is original_handler
     return {'passed':all(checks.values()),'checks':checks,'model_calls':0,'image_generations':0,'qq_messages_sent':0}

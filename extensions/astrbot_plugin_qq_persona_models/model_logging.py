@@ -99,6 +99,7 @@ class ModelActivityLogger:
                  'context_messages','image_count','tool_count','input_chars','node','mode',
                  'reason','next','route','image_tool_calls','configured_timeout_seconds',
                  'selected_previous_reference','available_reference_count','attached_reference_count',
+                 'image_source','source_message',
                  'recipient','confidence','judge_recent_messages','judge_recent_chars',
                  'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}

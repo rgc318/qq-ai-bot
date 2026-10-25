@@ -8,6 +8,23 @@ import os
 from pathlib import Path
 import re
 import time
+from urllib.parse import urlsplit,unquote
+
+
+def local_image_path(component):
+    for key in ('path','file','url'):
+        value=str(getattr(component,key,None) or '')
+        if not value or len(value)>4096:continue
+        if value.startswith('file://'):
+            parsed=urlsplit(value)
+            if parsed.netloc not in ('','localhost'):continue
+            value=unquote(parsed.path)
+        elif '://' in value or value.startswith('data:'):continue
+        try:
+            path=Path(value)
+            if path.is_file():return path
+        except OSError:continue
+    return None
 
 
 def public_activity(turn,now):
@@ -122,13 +139,13 @@ async def capture_turn(plugin,event,request):
     refs=[]
     for component in event.get_messages():
         images=(component.chain or []) if isinstance(component,Reply) else [component]
-        refs.extend(str(c.file or c.path or '') for c in images if isinstance(c,Image) and (c.file or c.path))
+        refs.extend(c for c in images if isinstance(c,Image) and (c.file or c.path))
     if not refs:return
     if event.get_extra('qq_image_followup_reference'):return
     paths=[]
-    for value in refs[:4]:
-        path=Path(value)
-        if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(Path('/AstrBot/data')) and path.stat().st_size<=20*1024*1024:
+    for component in refs[:4]:
+        path=local_image_path(component)
+        if path is not None and not path.is_symlink() and path.resolve().is_relative_to(Path('/AstrBot/data')) and path.stat().st_size<=20*1024*1024:
             if getattr(plugin,'cache_path',None) is not None:
                 try:
                     saved=await asyncio.to_thread(lambda p=path:cache_bytes(p.read_bytes(),plugin.cache_path.parent/'reply_media'))
@@ -144,6 +161,7 @@ async def capture_turn(plugin,event,request):
 
 
 def attach_followup(plugin,event,request):
+    if event.get_extra('qq_recent_upload_missing'):return
     turn=event.get_extra('qq_image_followup_reference')
     matched=turn is not None
     if turn is None:
@@ -175,6 +193,9 @@ def restored_paths(turn):
 
 def select_previous_reference(plugin,event,args):
     available=event.get_extra('qq_available_image_turn')
+    if event.get_extra('qq_current_image_turn') and not available:
+        if type(args.pop('use_previous_reference',False)) is not bool:raise ValueError('参考图选择必须是布尔值。')
+        return
     if available and available.get('reference_count') and 'use_previous_reference' not in args:raise ValueError('未明确是否沿用此前参考图，停止图片调用以免丢失原图。')
     choice=args.pop('use_previous_reference',False)
     if type(choice) is not bool:raise ValueError('参考图选择必须是布尔值。')
