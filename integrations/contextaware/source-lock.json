@@ -1,0 +1,73 @@
+{
+  "repository": "https://github.com/muyouzhi6/astrbot_plugin_context_aware",
+  "commit": "f026c5635f49b43b18f2f4e53eefbc7a0180cd94",
+  "version": "3.11.0",
+  "license": "MIT",
+  "files": {
+    "_conf_schema.json": {
+      "sha256": "0780f39f1e9dae0751d7c0a50ca33139063551a9561d8b88b8c4dd77e585e2ea",
+      "git_blob_sha1": "d2bb5834b9a3f94c60e118c5c1d902ef5781ede3",
+      "size": 27222
+    },
+    "audio_transcribe.py": {
+      "sha256": "09bc13636a03bea9b47b67d39e060324c4847f0f84dcbe09f85b3641c148124d",
+      "git_blob_sha1": "6d9308ff3603582f9e6f161f17184d9e9b15c337",
+      "size": 5663
+    },
+    "gif_frames.py": {
+      "sha256": "82d7e5ab9054ffd5ca9e940b8adf7a5d287aac0b786ecbc66f0e0adcd867c828",
+      "git_blob_sha1": "68a13d50e276fd63aade992e22444f4512a8131f",
+      "size": 12719
+    },
+    "image_compression.py": {
+      "sha256": "b613fe6762630650d97f8f4201213c1ffaf7877fcfc375c462c595d3c7e99572",
+      "git_blob_sha1": "ebf327e3294f9bec15ef08fa45c521298d4ab3d6",
+      "size": 11786
+    },
+    "image_context.py": {
+      "sha256": "21799e184781c5d6d0957825a1c61b6a72acdc21cd5e8b1178a2c829c9bff057",
+      "git_blob_sha1": "87d7e942c7ea3258d1912b8a9ac386b1873dd066",
+      "size": 24243
+    },
+    "image_reference_api.py": {
+      "sha256": "aa7943324f63144fbdadc088786978d8367442ce6ff085854803ce1a10a0bf0f",
+      "git_blob_sha1": "21fb56c390a8fa34d79be07cd8cea8d377763c2f",
+      "size": 7611
+    },
+    "LICENSE": {
+      "sha256": "d5f30fd646433e1c320c0405b740af8f869aa52b71a6334f012f3b5f42e635b5",
+      "git_blob_sha1": "a59a49fe9b420b02ba17c4b3ec506322b13557d5",
+      "size": 1066
+    },
+    "main.py": {
+      "sha256": "1844388e069063df27f6154b8fe5abb71dc0522e286db461ac1bbe19378bb432",
+      "git_blob_sha1": "ecd63c035353cc486040dea17ed231cf42a4164b",
+      "size": 191865
+    },
+    "metadata.yaml": {
+      "sha256": "515746b34333f4f0deba00287ea5051f583fb72357d0a62a9395d246c6c776b3",
+      "git_blob_sha1": "cfaeac1d794fcc582b417e40e4d9e35c983b6966",
+      "size": 1963
+    },
+    "model_capability.py": {
+      "sha256": "cc9371b38ce8fc6201ddd2e3c5071867bd846f289d3610bdc3d71bf3c5a19c9b",
+      "git_blob_sha1": "ff6161cbd1f2b882835fc59d00d25a06ffcea8a7",
+      "size": 2907
+    },
+    "private_topic.py": {
+      "sha256": "048fb9b052ef90c3455e3ba03a7a170647f2cd5458086defaadc80ccb90050ed",
+      "git_blob_sha1": "1194735e9fd831ed8a2e30584e09590917d752fd",
+      "size": 29231
+    },
+    "requirements.txt": {
+      "sha256": "cdcf61e58a860a633a95bd277038899d1a9611a8e3fb0c2799b770887e6a85d0",
+      "git_blob_sha1": "71368ded7763d071117b6b203e0e0f6679cdc1a7",
+      "size": 35
+    },
+    "video_input.py": {
+      "sha256": "c18c449dc433607c19b9e54ec57e8f3aa97988941d6f095950ee8359bfef1afb",
+      "git_blob_sha1": "0b6720f55cd8b865cb2396ee93d55dfd04c7ebdb",
+      "size": 41031
+    }
+  }
+}
