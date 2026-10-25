@@ -30,7 +30,7 @@ from .model_logging import ModelActivityLogger,event_trace,model_operation,count
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.8.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.8.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

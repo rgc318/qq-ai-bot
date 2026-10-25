@@ -11,6 +11,43 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
 
 class ImageToolGuardTests(unittest.IsolatedAsyncioTestCase):
+    def wrapped(self,handler):
+        inner=SimpleNamespace(name='generate_image',handler=handler,description='fixture',parameters={'type':'object','properties':{'prompt':{'type':'string'}},'required':['prompt']})
+        return SimpleNamespace(name=inner.name,handler=None,_wrapped=inner,description=inner.description,parameters=inner.parameters)
+
+    async def test_permission_wrapper_request_copy_guards_nested_handler(self):
+        called=[]
+        async def handler(event,prompt):called.append(prompt);return prompt
+        original=self.wrapped(handler)
+        request=SimpleNamespace(func_tool=SimpleNamespace(tools=[original]))
+        module.prepare_chat_image_tools(request,indexed_references=True)
+        guarded=request.func_tool.tools[0]
+        self.assertIsNone(guarded.handler,'Native permission call() must remain in control')
+        self.assertIsNot(guarded._wrapped,original._wrapped)
+        self.assertIs(original._wrapped.handler,handler)
+        result=await guarded._wrapped.handler(None,prompt='blocked',**{module.IMAGE_GUARD_ERROR:'missing selection'})
+        self.assertIn('未调用图片模型',result)
+        self.assertFalse(called)
+
+    async def test_runtime_permission_wrapper_is_guarded_and_restored(self):
+        async def handler(event,prompt):return prompt
+        tool=self.wrapped(handler);guard=module.ImageExecutionGuard()
+        guard.install(tool)
+        self.assertIsNone(tool.handler)
+        result=await tool._wrapped.handler(None,prompt='blocked',**{module.IMAGE_GUARD_ERROR:'missing choice'})
+        self.assertIn('未调用图片模型',result)
+        guard.restore();self.assertIs(tool._wrapped.handler,handler)
+
+    async def test_nested_wrappers_preserve_allowed_result(self):
+        async def handler(event,prompt):return prompt
+        original=self.wrapped(handler);outer=self.wrapped(handler);outer._wrapped=original
+        request=SimpleNamespace(func_tool=SimpleNamespace(tools=[outer]))
+        module.prepare_chat_image_tools(request)
+        clone=request.func_tool.tools[0]
+        self.assertIsNone(clone.handler);self.assertIsNone(clone._wrapped.handler)
+        self.assertEqual(await clone._wrapped._wrapped.handler(None,prompt='allowed'),'allowed')
+        self.assertIs(original._wrapped.handler,handler)
+
     async def test_runtime_unwrapped_handler_is_guarded_and_restored(self):
         async def handler(event,prompt):return prompt
         tool=SimpleNamespace(handler=handler)

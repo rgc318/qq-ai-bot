@@ -13,6 +13,7 @@ from deployment_api import DeploymentAPI,write_report
 
 ROOT=Path(__file__).resolve().parents[1]
 NAME='astrbot_plugin_qq_persona_models'
+VERSION='1.8.1'
 CONTAINER='qq-ai-bot-astrbot-1'
 api=DeploymentAPI()
 path='/api/v1/plugins/'+NAME+'/config'
@@ -35,7 +36,7 @@ def idle():
 
 def version():
     item=next(x for x in api.call('/api/v1/plugins')['data'] if x['name']==NAME)
-    assert item['activated'] and item['version']=='1.8.0', 'Do not call new diagnostics on an older plugin'
+    assert item['activated'] and item['version']==VERSION, 'Do not call new diagnostics on an older plugin'
 
 idle()
 api.backup('multimodal-config-before-'+stamp+'.json',old)
@@ -76,7 +77,7 @@ try:
     report['passed']=all(report['checks'].values())
     write_report('multimodal-deployment-verification.json',report)
     assert report['passed'], 'Deployment verification failed'
-    print(json.dumps({'passed':True,'version':'1.8.0','checks':report['checks'],'measurements':report['attachments_only']['measurements']},ensure_ascii=False))
+    print(json.dumps({'passed':True,'version':VERSION,'checks':report['checks'],'measurements':report['attachments_only']['measurements']},ensure_ascii=False))
 except Exception as exc:
     report['passed']=False;report['error_type']=type(exc).__name__
     if changed:

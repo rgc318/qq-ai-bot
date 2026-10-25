@@ -8,6 +8,7 @@ IMAGE_GUARD_ERROR='_qq_image_guard_error'
 
 def guard_image_handler(handler):
     """Return validation failures from the executor, not a swallowed event hook."""
+    if getattr(handler,'_qq_image_guarded',False):return handler
     @wraps(handler)
     def guarded(*args,**kwargs):
         error=kwargs.pop(IMAGE_GUARD_ERROR,None)
@@ -20,16 +21,36 @@ def guard_image_handler(handler):
     return guarded
 
 
+def guarded_image_tool_copy(tool,seen=()):
+    """Clone the native permission proxy chain; never replace its call() path.
+
+    Core keeps _PermissionGuardedTool.handler=None and calls _wrapped.handler
+    after authorization. Guarding only the outer handler misses that path;
+    assigning an outer handler would bypass the native permission check.
+    """
+    if id(tool) in seen or len(seen)>=32:raise ValueError('图片工具包装链无效')
+    cloned=copy(tool)
+    wrapped=getattr(tool,'_wrapped',None)
+    if wrapped is not None:cloned._wrapped=guarded_image_tool_copy(wrapped,(*seen,id(tool)))
+    handler=getattr(tool,'handler',None)
+    if callable(handler):cloned.handler=guard_image_handler(handler)
+    return cloned
+
+
 class ImageExecutionGuard:
     """Guard the tool actually passed to native hooks, including unwrapped ones."""
     def __init__(self):self.patches=[]
 
     def install(self,tool):
-        handler=getattr(tool,'handler',None)
-        if callable(handler) and not getattr(handler,'_qq_image_guarded',False):
-            wrapper=guard_image_handler(handler)
-            tool.handler=wrapper
-            self.patches.append((tool,handler,wrapper))
+        seen=set()
+        while tool is not None and id(tool) not in seen and len(seen)<32:
+            seen.add(id(tool))
+            handler=getattr(tool,'handler',None)
+            if callable(handler) and not getattr(handler,'_qq_image_guarded',False):
+                wrapper=guard_image_handler(handler)
+                tool.handler=wrapper
+                self.patches.append((tool,handler,wrapper))
+            tool=getattr(tool,'_wrapped',None)
 
     def restore(self):
         for tool,original,wrapper in reversed(self.patches):
@@ -46,9 +67,7 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
         if tool.name not in IMAGE_TOOLS:
             result.tools.append(tool)
             continue
-        cloned=copy(tool)
-        if callable(getattr(tool,'handler',None)):
-            cloned.handler=guard_image_handler(tool.handler)
+        cloned=guarded_image_tool_copy(tool)
         cloned.parameters=deepcopy(tool.parameters)
         properties=cloned.parameters.get('properties',{})
         for key in ('return_result','refs'):
