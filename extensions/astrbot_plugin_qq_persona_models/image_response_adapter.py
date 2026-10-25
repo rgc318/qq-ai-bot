@@ -1,0 +1,52 @@
+"""Defer image-only non-stream text to the existing post-validation notice hook."""
+from functools import wraps
+
+IMAGE_TOOLS={'generate_image','generate_selfie'}
+
+
+def defer_notice(event,response):
+    if not event or not event.get_extra('qq_image_task_contract_enabled') or not event.get_extra('qq_image_notice_defer_enabled') or getattr(response,'is_chunk',False):return False
+    names=getattr(response,'tools_call_name',None) or []
+    if not names or not set(names).issubset(IMAGE_TOOLS):return False
+    # OpenAI-compatible providers use a MessageChain even for plain text.
+    # Defer all-Plain chains, while preserving any independent rich media.
+    chain=getattr(response,'result_chain',None)
+    if chain and any(type(part).__name__!='Plain' for part in getattr(chain,'chain',[])):return False
+    text=' '.join((getattr(response,'completion_text','') or '').split())
+    args=getattr(response,'tools_call_args',None) or []
+    if not all(isinstance(a,dict) for a in args) or len(args)!=len(names):return False
+    source='existing_parameter'
+    if text and len(text)<=160:
+        for a in args:
+            existing=a.get('pending_message')
+            if not isinstance(existing,str) or not 0<len(existing.strip())<=160:
+                a['pending_message']=text;source='same_response_text'
+    response.result_chain=None
+    response.completion_text=''
+    event.set_extra('qq_deferred_notice_source',source)
+    return bool(text)
+
+
+class ImageResponseAdapter:
+    def __init__(self):self.patch=None
+    def install(self):
+        if self.patch:return
+        from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        owner=ToolLoopAgentRunner;original=owner._iter_llm_responses_with_fallback
+        @wraps(original)
+        async def wrapped(runner,*args,**kwargs):
+            iterator=original(runner,*args,**kwargs)
+            try:
+                async for response in iterator:
+                    if not getattr(runner,'streaming',True):
+                        event=getattr(getattr(getattr(runner,'run_context',None),'context',None),'event',None)
+                        defer_notice(event,response)
+                    yield response
+            finally:await iterator.aclose()
+        owner._iter_llm_responses_with_fallback=wrapped
+        self.patch=(owner,original,wrapped)
+    def restore(self):
+        if self.patch:
+            owner,original,wrapped=self.patch
+            if owner._iter_llm_responses_with_fallback is wrapped:owner._iter_llm_responses_with_fallback=original
+            self.patch=None

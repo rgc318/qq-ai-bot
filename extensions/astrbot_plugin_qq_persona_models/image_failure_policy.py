@@ -32,6 +32,13 @@ class ImageFailurePolicy:
         state=event.get_extra('qq_image_failure_state')
         if state:state['attempts']+=1
 
+    def validation_rejected(self,event,code):
+        state=event.get_extra('qq_image_failure_state')
+        if not state or state['blocked']:return
+        state['validation_failures']=state.get('validation_failures',0)+1
+        if state['validation_failures']>=2:
+            state.update(blocked=True,reason='图片任务/素材校验连续两次未通过（'+code+'），本轮没有启动这次生成；请澄清任务或提供可用来源')
+
     def record_failure(self,meta,error):
         state=self.states.get(meta.get('trace'))
         if not state:return

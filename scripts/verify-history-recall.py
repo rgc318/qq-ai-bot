@@ -13,7 +13,7 @@ plugin=next(p for p in api.call('/api/v1/plugins')['data'] if p['name']==name)
 # Do not serialize provider credentials or full plugin settings.
 checks={
     'plugin_active':plugin['activated'],
-    'compatible_version':plugin['version'] in ('1.8.0','1.8.1','1.9.0'),
+    'compatible_version':plugin['version'] in ('1.8.0','1.8.1','1.9.0','1.10.0'),
     'index_enabled_and_ready':status['enabled'] and not status['initializing'] and 'error_type' not in status['bootstrap'],
     'local_index_has_verified_history':status['counts']['documents']>0,
     'tools_enabled':{'search_chat_history','read_chat_history'}.issubset(enabled),

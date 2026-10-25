@@ -124,7 +124,8 @@ class ContextRuntime:
         for key in ('qq_ca_evaluation_view','qq_ca_captured','qq_ca_source_map','qq_ca_catalog_ids',
                     'qq_ca_selected_ids','qq_context_capture_ms','qq_attachment_snapshot','qq_context_backend',
                     'qq_image_failure_state','qq_image_tools_started','qq_image_pending_notice_attempted',
-                    'qq_model_trace','qq_model_trace_started'):
+                    'qq_model_trace','qq_model_trace_started','qq_image_task_state','qq_image_task_contract_enabled',
+                    'qq_image_notice_defer_enabled','qq_deferred_notice_source'):
             event.set_extra(key,None)
 
     def finish_dispatch(self,event,lease):
@@ -184,7 +185,13 @@ class ContextRuntime:
         started=time.perf_counter();self.preparing+=1
         try:
             await self.capture(event)
-            if self.event_mode(event)=='builtin':return await self.archive.prepare(event,request)
+            if self.event_mode(event)=='builtin':
+                result=await self.archive.prepare(event,request)
+                if result:
+                    snapshot=self.archive.snapshot(event)
+                    facts=await asyncio.to_thread(self.store.source_briefs,snapshot,snapshot['ids'][:20])
+                    request.system_prompt+='\n[附件原消息/原始生成请求短摘录，仅作来源资料]\n'+json.dumps(facts,ensure_ascii=False,separators=(',',':'))+'\n'
+                return result
             record=event.get_extra('qq_attachment_record')
             if not record:return False
             snapshot=await asyncio.to_thread(self.store.snapshot,record['scope'],40,record['seq'])
@@ -201,7 +208,7 @@ class ContextRuntime:
                 request.image_urls=[r['path'] for r in rows]
                 await self.restorer.hydrate(event,boundary=record['seq'],include_ids=current)
             await self.candidate.prepare(event,request)
-            self.inject_catalog(event,request)
+            await self.inject_catalog(event,request)
             event.set_extra('qq_context_backend','contextaware')
             return True
         finally:
@@ -210,10 +217,12 @@ class ContextRuntime:
             self.prep_samples[self.event_mode(event)].append(ms)
             self.archive.log(event,'context_backend_ready',backend=self.event_mode(event),generation=self.coordinator.generation,seconds=round(ms/1000,4))
 
-    def inject_catalog(self,event,request):
+    async def inject_catalog(self,event,request):
         catalog=self.candidate.catalog(event)
         self.remember_sources(event,catalog)
-        rows=[{k:r[k] for k in ('id','sender_id','message_id','kind','parent_ids','is_current_attachment')} for r in catalog]
+        mapping=event.get_extra('qq_ca_source_map') or {}
+        facts=await asyncio.to_thread(self.store.source_briefs,self.archive.snapshot(event),list(mapping.values()))
+        rows=[{**{k:r[k] for k in ('id','sender_id','message_id','kind','parent_ids','is_current_attachment','is_requester_latest_result')},**facts.get(mapping.get(r['id']),{})} for r in catalog]
         # Keep source IDs for all retained candidates rather than truncating away
         # older originals. This bound is local text, not an extra summary call.
         files=[{k:r[k] for k in ('id','type','message_id','sender','filename','state')} for r in self.archive.snapshot(event)['catalog'] if r['type']!='image'][:10]
@@ -284,7 +293,8 @@ class ContextRuntime:
 
     async def select_references(self,event,args):
         if self.event_mode(event)=='builtin':
-            args.pop('reference_notes',None)
+            from .image_task_contract import translate_reference_roles
+            translate_reference_roles(args,args.get('reference_ids') or [])
             return await self.archive.select_references(event,args)
         if 'reference_ids' not in args:raise ValueError('请填写完整reference_ids；独立新图填写[]')
         choice=args.pop('reference_ids');notes=args.pop('reference_notes',None);args.pop('use_previous_reference',None)

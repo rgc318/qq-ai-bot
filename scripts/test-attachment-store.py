@@ -18,6 +18,18 @@ class StoreTests(unittest.TestCase):
         for asset_id in record['ids']:self.store.retain(record['scope'],record['epoch'],asset_id,data,'image/png','png')
     def test_duplicate_event_is_idempotent(self):
         a=self.record();b=self.record();self.assertEqual(a,b);self.assertEqual(self.store.stats()['messages'],1)
+    def test_source_brief_uses_original_generated_request_and_scope(self):
+        request=self.store.record('s','bot:G','request','A','A','基于角色原图生成完整三视图',[])
+        generated=self.store.record('s','bot:G','result','bot','AI','已发送图片',[{'type':'image','source':{'generated':True,'request_seq':request['seq']}}],kind='generated')
+        snapshot=self.store.snapshot('s');brief=self.store.source_briefs(snapshot,generated['ids'])
+        self.assertEqual(brief[generated['ids'][0]]['source_text'],'基于角色原图生成完整三视图')
+        with self.assertRaises(ValueError):self.store.source_briefs(self.store.snapshot('other'),generated['ids'])
+        self.store.invalidate('s')
+        with self.assertRaises(ValueError):self.store.source_briefs(snapshot,generated['ids'])
+    def test_source_briefs_have_one_global_character_budget(self):
+        for i in range(12):self.store.record('s','bot:G',str(i),'A','A','长资料'*100,[{'type':'image','source':{}}])
+        snapshot=self.store.snapshot('s');briefs=self.store.source_briefs(snapshot,snapshot['ids'])
+        self.assertLessEqual(sum(len(r['source_text']) for r in briefs.values()),640)
     def test_multiple_messages_and_image_positions_survive(self):
         a=self.record(count=2);b=self.record(mid='two');self.assertEqual(len(self.store.snapshot('s')['ids']),3);self.assertNotEqual(a['ids'][0],a['ids'][1]);self.assertNotEqual(a['ids'][0],b['ids'][0])
     def test_scope_and_authorized_ids_are_enforced(self):

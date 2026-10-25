@@ -63,7 +63,10 @@ async def run():
             raw.message_str=text;raw.message=[Plain(text=text)];raw.raw_message={}
             if image:raw.message.append(Image.fromFileSystem(str(image)))
             class Event(AstrMessageEvent):
-                async def send(self,chain,*args,**kw):self.set_extra('sent_fixture',True);return None
+                async def send(self,chain,*args,**kw):
+                    self.set_extra('sent_fixture',True)
+                    sent=self.get_extra('sent_texts') or [];sent.append(''.join(getattr(c,'text','') for c in getattr(chain,'chain',[])))
+                    self.set_extra('sent_texts',sent);return None
             e=Event(text,raw,PlatformMetadata(name='aiocqhttp',description='synthetic',id='fixture'),'G')
             e.plugins_name=['astrbot_plugin_qq_persona_models'];e.set_extra('user_policy_effective_persona_id',persona)
             e.set_extra('user_policy_decision',SimpleNamespace(is_blocked=False,memory_isolation=True,identity=SimpleNamespace(is_private=False,group_id='fixture:G',user_id=sender)))
@@ -233,6 +236,56 @@ async def run():
             check('native_runner_sees_image_tools_removed_after_fatal_failure',len(schemas)==2 and 'generate_image' not in schemas[1])
             check('fatal_failure_has_only_one_actual_image_attempt',called==['fixture'])
             await release(native_failure)
+            from runtime_fixture.image_task_checks import verify_image_tasks
+            pure=await verify_image_tasks()
+            for name,value in pure['checks'].items():check('task_'+name,value)
+            from runtime_fixture.image_response_adapter import ImageResponseAdapter
+            adapter=ImageResponseAdapter();adapter.install()
+            probe.config['image_pending_notice']={'enabled':True,'model_generated':True}
+            try:
+                for repair in (True,False):
+                    e=event('把之前的图改成毛绒玩偶');e.set_extra('qq_diagnostic',False)
+                    calls=[];seen_schemas=[]
+                    async def guarded_stub(ev,prompt):
+                        calls.append({'prompt':prompt,'pixels':[Path(c.path).read_bytes() for c in ev.get_messages() if isinstance(c,Image)]})
+                        return '合成图片执行已捕获，未调用图片模型或发图。'
+                    tool=FunctionTool(name='generate_image',description='synthetic',parameters={'type':'object','properties':{'prompt':{'type':'string'}},'required':['prompt']},handler=guarded_stub)
+                    req=ProviderRequest(prompt=e.message_str,func_tool=ToolSet(tools=[tool]))
+                    await runtime.prepare(e,req)
+                    chosen=next(r['id'] for r in runtime.candidate.catalog(e) if r['message_id']==upload.message_obj.message_id)
+                    prepare_chat_image_tools(req,indexed_references=True,model_notice=True,task_contract=True)
+                    e.set_extra('qq_image_task_contract_enabled',True);e.set_extra('qq_image_notice_defer_enabled',True)
+                    probe.image_failure_policy.track(e,req)
+                    class ContractProvider:
+                        provider_config={'id':'synthetic','modalities':['text','tool_use']}
+                        def get_model(self):return 'synthetic'
+                        async def text_chat(self,**kw):
+                            seen_schemas.append(kw['func_tool'].names() if kw.get('func_tool') else [])
+                            n=len(seen_schemas)
+                            if n>2:return LLMResponse(role='assistant',completion_text='当前资料未确认，先澄清。')
+                            ids=[chosen] if repair and n==2 else []
+                            return LLMResponse(role='assistant',result_chain=e.plain_result('我来保留原造型，把材质改成绒布。'),tools_call_name=['generate_image'],tools_call_args=[{'prompt':'fixture','image_task':{'operation':'edit','reason':'沿用既有角色图','independent_quote':''},'reference_ids':ids,'reference_notes':[{'image_id':i,'purpose':'角色底稿'} for i in ids]}],tools_call_ids=['contract-'+str(n)])
+                    async def starts(ctx,t,args):
+                        await probe.normalize_image_arguments(e,t,args)
+                        await probe.announce_image_generation(e,t,args)
+                    async def ends(ctx,t,args,result):await probe.track_image_tool_result(e,t,args,result)
+                    runner=ToolLoopAgentRunner()
+                    await runner.reset(provider=ContractProvider(),request=req,run_context=SimpleNamespace(context=SimpleNamespace(event=e),messages=[],tool_call_timeout=10),tool_executor=FunctionToolExecutor,agent_hooks=SimpleNamespace(on_tool_start=starts,on_tool_end=ends,on_agent_begin=no_op,on_agent_done=no_op))
+                    public=[]
+                    async for output_response in runner.step_until_done(5):
+                        chain=getattr(getattr(output_response,'data',None),'chain',None)
+                        public.append(''.join(getattr(c,'text','') for c in getattr(chain,'chain',[])))
+                    if repair:
+                        check('native_invalid_edit_never_executes_before_repair',len(calls)==1 and calls[0]['pixels']==[front.read_bytes()])
+                        check('native_notice_sent_once_after_valid_selection',e.get_extra('sent_texts')==['我来保留原造型，把材质改成绒布。'])
+                        check('native_early_promise_deferred',not any('保留原造型' in t for t in public))
+                        check('native_roles_forwarded_helpers_stripped','reference_number' in calls[0]['prompt'])
+                    else:
+                        check('native_repeated_invalid_edit_has_zero_execution',not calls)
+                        check('native_repeated_invalid_edit_has_no_notice',not e.get_extra('sent_texts'))
+                        check('native_validation_budget_removes_tools',len(seen_schemas)==3 and 'generate_image' not in seen_schemas[-1])
+                    await release(e)
+            finally:adapter.restore()
             probes={}
             for mode in ('builtin','contextaware'):
                 await runtime.switch(mode)

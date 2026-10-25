@@ -131,6 +131,23 @@ class AttachmentStore:
             rows=sorted(rows,key=lambda r:(json.loads(r['source']).get('request_seq',r['seq']),r['seq'],-r['ordinal']),reverse=True)[:max(1,min(limit,80))]
         return {'scope':scope,'epoch':epoch,'seq':seq,'ids':[r['id'] for r in rows],'catalog':[self.public(r) for r in rows]}
 
+    def source_briefs(self,snapshot,ids):
+        """Bounded source facts, not visual captions or inferred task matches."""
+        if self.epoch(snapshot['scope'])!=snapshot['epoch']:raise ValueError('本轮会话已失效')
+        if not ids:return {}
+        ids=list(dict.fromkeys(ids))[:20]
+        if any(i not in snapshot['ids'] for i in ids):raise ValueError('附件不在本轮目录')
+        marks=','.join('?' for _ in ids)
+        with self.db() as db:
+            rows=db.execute('SELECT a.id,a.seq,a.source,e.text AS source_text,t.text AS task_text FROM assets a JOIN events e ON e.seq=a.seq LEFT JOIN events t ON t.seq=json_extract(a.source,\'$.request_seq\') AND t.scope=a.scope AND t.epoch=a.epoch WHERE a.scope=? AND a.epoch=? AND a.seq<=? AND a.id IN ('+marks+')',(snapshot['scope'],snapshot['epoch'],snapshot['seq'],*ids)).fetchall()
+        budget=640;result={}
+        for row in sorted(rows,key=lambda r:r['seq'],reverse=True):
+            source=json.loads(row['source']);text=row['task_text'] if source.get('generated') and row['task_text'] else row['source_text']
+            excerpt=' '.join((text or '').split())[:min(96,budget)]
+            if excerpt:result[row['id']]={'source_text':excerpt,'request_order':source.get('request_seq',row['seq'])};budget-=len(excerpt)
+            if budget<=0:break
+        return result
+
     def resolve(self,snapshot,ids,kind=None,max_count=4):
         if not isinstance(ids,list) or not 1<=len(ids)<=max_count or len(set(ids))!=len(ids):raise ValueError('请提供目录中互不重复的附件ID列表')
         if self.epoch(snapshot['scope'])!=snapshot['epoch']:raise ValueError('本轮会话已失效')

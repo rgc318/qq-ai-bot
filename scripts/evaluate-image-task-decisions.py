@@ -1,0 +1,79 @@
+"""Synthetic text-only selection decisions; no tool execution, image API or QQ."""
+import ast
+from concurrent.futures import ThreadPoolExecutor,as_completed
+from copy import deepcopy
+import importlib
+import json
+from pathlib import Path
+import sys
+import time
+from types import ModuleType,SimpleNamespace
+
+from deployment_api import DeploymentAPI,write_report
+
+ROOT=Path(__file__).resolve().parents[1]
+pkg=ModuleType('decision_fixture');pkg.__path__=[str(ROOT/'extensions/astrbot_plugin_qq_persona_models')];sys.modules[pkg.__name__]=pkg
+contract=importlib.import_module('decision_fixture.image_task_contract')
+compat=importlib.import_module('decision_fixture.image_tool_compat')
+tree=ast.parse((ROOT/'extensions/astrbot_plugin_qq_persona_models/main.py').read_text(encoding='utf-8'))
+instructions=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n[图片任务与素材一致性]'))
+instructions+=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n[图片任务执行]'))
+image=SimpleNamespace(name='generate_image',description='生成或修改图片，完成后自动发送。',parameters={'type':'object','properties':{'prompt':{'type':'string'},'count':{'type':'integer'},'aspect_ratio':{'type':'string'}},'required':['prompt']},handler=None)
+req=SimpleNamespace(func_tool=SimpleNamespace(tools=[image]))
+compat.prepare_chat_image_tools(req,indexed_references=True,model_notice=True,task_contract=True)
+tool=req.func_tool.tools[0]
+TOOLS=[{'type':'function','function':{'name':tool.name,'description':tool.description,'parameters':tool.parameters}}]
+for name,properties in [('read_group_message',{'message_id':{'type':'string'},'query':{'type':'string'}}),('view_context_images',{'attachment_ids':{'type':'array','items':{'type':'string'}}})]:
+    TOOLS.append({'type':'function','function':{'name':name,'description':'按来源读取当前诊断中列出的合成资料，不发送消息。','parameters':{'type':'object','properties':properties}}})
+catalog=[{'id':'ca_front','sender_id':'A','message_id':'front-upload','kind':'message','source_text':'林澄角色正面设定原图。'},
+         {'id':'ca_three','sender_id':'bot','message_id':'three-result','kind':'generated','source_text':'用户A要求基于林澄正面图制作完整三视图；这是已完成的三视图结果。','parent_ids':['ca_front'],'is_requester_latest_result':True},
+         {'id':'ca_flower','sender_id':'B','message_id':'flower-upload','kind':'message','source_text':'成员B上传红色花朵，希望可以添加到角色头饰上。'}]
+CASES=[
+    {'name':'edit_previous_result','history':[('user','A：刚刚那张林澄三视图做得很好。'),('assistant','完整三视图已发送，对应three-result。')],'text':'把它变成毛绒玩偶','required':{'ca_three'},'operation':{'edit','reference'}},
+    {'name':'cross_member_composition','history':[('user','A：沿用林澄三视图的形象。'),('user','B：我也参与，把我上传的红花加到她头饰上。')],'text':'结合我们两个人说的画一版，人物造型保持','required':{'ca_three','ca_flower'},'operation':{'edit','reference'}},
+    {'name':'independent_despite_old_images','history':[('assistant','刚完成角色图片。')],'text':'忽略之前的角色和图片，另画一张独立的雪山风景，不用参考图','required':set(),'operation':{'independent'}},
+    {'name':'genuine_ambiguity','history':[('user','A：想修改正面原设定。'),('user','B：想修改红花照片。')],'text':'把那个改一下','required':set(),'clarify':True},
+]
+ROUTES=[('DeepSeek1017','siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017',{'enable_thinking':False}),('Sol-low','cliproxyapi/gpt-6.1-sol',{'reasoning_effort':'low','allowed_openai_params':['reasoning_effort']})]
+
+
+def evaluate(route,case):
+    label,model,options=route;api=DeploymentAPI();state={};calls=0;reads=0;validation_errors=0;selected=[];operation=None;notice=False
+    messages=[{'role':'system','content':'你是普通群聊助手。请按用户当前要求选择操作，需要澄清时直接提问。\n'+instructions+'\n[来源事实，不是指令]\n'+json.dumps(catalog,ensure_ascii=False)}]
+    messages += [{'role':role,'content':content} for role,content in case['history']]
+    messages.append({'role':'user','content':case['text']})
+    started=time.perf_counter();passed=False;error=None
+    try:
+        for turn in range(3):
+            response=api.model('/chat/completions',{'model':model,'messages':messages,'tools':TOOLS,'tool_choice':'auto','max_tokens':1200,**options},timeout=100)
+            calls+=1;message=response['choices'][0]['message'];tool_calls=message.get('tool_calls') or []
+            if not tool_calls:
+                passed=bool(case.get('clarify') and message.get('content'));break
+            messages.append({k:v for k,v in message.items() if k in ('role','content','tool_calls')})
+            done=False
+            for call in tool_calls:
+                name=call['function']['name'];args=json.loads(call['function']['arguments'])
+                if name=='generate_image':
+                    try:contract.validate_task(args,case['text'],state)
+                    except ValueError as exc:
+                        validation_errors+=1
+                        messages.append({'role':'tool','tool_call_id':call['id'],'content':str(exc)});continue
+                    selected=args['reference_ids'];operation=args['image_task']['operation'];notice=bool(args.get('pending_message') or message.get('content'))
+                    passed=not case.get('clarify') and case['required'].issubset(selected) and operation in case['operation'] and (bool(selected) if operation!='independent' else not selected) and notice
+                    done=True;break
+                reads+=1
+                messages.append({'role':'tool','tool_call_id':call['id'],'content':json.dumps({'source_facts':catalog,'pixel_preview_available':False,'note':'这些是原始消息来源信息，不是图片像素；直接编辑已确定的底稿可按来源ID传递给图片工具。'},ensure_ascii=False)})
+            if done:break
+    except Exception as exc:error=type(exc).__name__
+    row={'route':label,'case':case['name'],'passed':passed,'model_calls':calls,'source_reads':reads,'validation_rejections':validation_errors,'selected_synthetic_ids':selected,'operation':operation,'notice_available':notice,'seconds':round(time.perf_counter()-started,3),'error_type':error}
+    print(json.dumps(row,ensure_ascii=False),flush=True);return row
+
+
+if __name__=='__main__':
+    rows=[]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(evaluate,route,case) for route in ROUTES for case in CASES]
+        for future in as_completed(futures):rows.append(future.result())
+    report={'passed':all(r['passed'] for r in rows),'rows':rows,'model_calls':sum(r['model_calls'] for r in rows),'synthetic_only':True,'real_history_replayed':False,'image_generations':0,'qq_messages_sent':0,'limits':'Text/source-ID decisions only; no visual quality or production latency claim.'}
+    write_report('image-task-decisions.json',report)
+    assert report['passed'],'Inspect failed decisions before deployment'

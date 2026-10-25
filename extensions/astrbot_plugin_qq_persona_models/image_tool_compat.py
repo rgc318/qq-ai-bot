@@ -57,7 +57,7 @@ class ImageExecutionGuard:
             if tool.handler is wrapper:tool.handler=original
         self.patches=[]
 
-def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False,indexed_references=False):
+def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False,indexed_references=False,task_contract=False):
     source=getattr(request,'func_tool',None)
     if source is None:
         return
@@ -88,6 +88,11 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
             properties.pop('use_previous_reference',None)
             cloned.parameters['required']=[k for k in cloned.parameters.get('required',[]) if k!='use_previous_reference']
             if 'reference_ids' not in cloned.parameters['required']:cloned.parameters['required'].append('reference_ids')
+        if task_contract:
+            from .image_task_contract import task_schema,notes_schema
+            properties['image_task']=task_schema();properties['reference_notes']=notes_schema()
+            for key in ('image_task','reference_ids','reference_notes'):
+                if key not in cloned.parameters.setdefault('required',[]):cloned.parameters['required'].append(key)
         cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 当前为普通聊天：生成后自动发送图片；参考图由程序从当前消息和引用的图片中自动获取，不填写本地文件路径或插件内部参数。'
         if indexed_references:
             cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 生成后自动发送图片。用reference_ids明确选择参考集合，独立新图填[]；先确认所选图的内容与来源，不填写文件路径。'

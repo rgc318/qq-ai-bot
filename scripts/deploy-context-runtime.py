@@ -21,10 +21,10 @@ CONTAINER='qq-ai-bot-astrbot-1'
 LIVE='/AstrBot/data/plugins/'+NAME
 DATA='/AstrBot/data/plugin_data/'+NAME
 SOURCE=DATA+'/contextaware-source'
-VERSION='1.9.0'
+VERSION='1.10.0'
 api=DeploymentAPI()
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--baseline',choices=('1.8.1','1.9.0'),default='1.8.1',help='Explicitly reviewed live version')
+parser.add_argument('--baseline',choices=('1.8.1','1.9.0','1.10.0'),default='1.9.0',help='Explicitly reviewed live version')
 args=parser.parse_args()
 CONFIG='/api/v1/plugins/'+NAME+'/config'
 before_config=api.call(CONFIG)['data']['config']
@@ -51,7 +51,7 @@ def idle():
         proactive=proactive.get('data',proactive)
         queued=any(proactive.get('tasks',{}).get(k,0) for k in ('delay','running_check')) or bool(proactive.get('gate',{}).get('running'))
         owned=False
-        if plugin()['version']=='1.9.0':
+        if plugin()['version'] in ('1.9.0','1.10.0'):
             runtime=backend();owned=runtime['active_requests'] or runtime['pending_messages'] or runtime['switching']
         stable=0 if active or queued or owned else stable+1
         if stable>=3:return
@@ -120,7 +120,7 @@ try:
     report['checks']['page_registered']=any('上下文后端' in str(p) for p in current.get('pages',[]))
     report['checks']['page_namespace_api']=api.call('/api/plug/'+NAME+'/context_backend/status')['data']['backend']==state['backend']
     assert all(report['checks'].values()),'Runtime initialization verification failed'
-    for mode in ('attachments_only','image_reference_only','image_notice_only','recent_upload_only','image_followup_only','model_logging_only','group_permissions_only'):
+    for mode in ('attachments_only','image_reference_only','image_notice_only','recent_upload_only','image_followup_only','model_logging_only','group_permissions_only','image_task_only'):
         result=api.call('/api/plug/qq_persona_models/verify_memory_meme',{mode:True},timeout=120)['data']
         assert result.get('model_calls',0)==0 and result.get('qq_messages_sent',0)==0,'Unexpected diagnostic side effects'
         report['checks'][mode]=result['passed'];report[mode+'_count']=len(result.get('checks',{}))

@@ -29,9 +29,11 @@ from .tool_response_contract import restore_tool_response_contract
 from .model_logging import ModelActivityLogger,event_trace,model_operation,count_image_parts
 from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool_started,reply_finished,result_state,select_previous_reference
 from .image_failure_policy import ImageFailurePolicy
+from .image_task_contract import validate_task,consume_task,complete_task
+from .image_response_adapter import ImageResponseAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.9.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.10.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -45,6 +47,7 @@ class PersonaModelBindings(Star):
         self.model_activity=ModelActivityLogger(dict(config.get('model_logging',{})))
         self.image_execution_guard=ImageExecutionGuard()
         self.image_failure_policy=ImageFailurePolicy()
+        self.image_response_adapter=ImageResponseAdapter()
         self.chat_history_store=None
         self.history_job=None
         self.history_bootstrap={}
@@ -55,6 +58,7 @@ class PersonaModelBindings(Star):
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
         self.model_activity.install(self.context)
+        self.image_response_adapter.install()
         self.cache_path=StarTools.get_data_dir('astrbot_plugin_qq_persona_models')/'reply_context.json'
         archive=await asyncio.to_thread(AttachmentContext,self,self.cache_path.parent/'multimodal',dict(self.config.get('multimodal_context',{})))
         from .context_runtime import ContextRuntime
@@ -109,6 +113,7 @@ class PersonaModelBindings(Star):
     async def terminate(self):
         if getattr(self,'attachments',None):await self.attachments.close()
         self.image_execution_guard.restore()
+        self.image_response_adapter.restore()
         self.model_activity.restore()
         self.image_upload_adapter.restore()
         self.image_quote_adapter.restore()
@@ -329,6 +334,9 @@ class PersonaModelBindings(Star):
     async def verify_memory_meme(self):
         from quart import jsonify, request
         payload=await request.get_json(silent=True) or {}
+        if payload.get('image_task_only'):
+            from .image_task_checks import verify_image_tasks
+            return jsonify({'status':'ok','data':await verify_image_tasks()})
         if payload.get('attachments_only'):
             from .attachment_checks import verify_attachments
             return jsonify({'status':'ok','data':await verify_attachments(self)})
@@ -443,10 +451,20 @@ class PersonaModelBindings(Star):
                 try:
                     failures=getattr(self,'image_failure_policy',None)
                     if failures:failures.check(event)
+                    contract=bool(event.get_extra('qq_image_task_contract_enabled'))
+                    task_meta={}
+                    if contract:
+                        state=event.get_extra('qq_image_task_state')
+                        if state is None:state={};event.set_extra('qq_image_task_state',state)
+                        task_meta=validate_task(tool_args,event.get_message_str(),state)
+                    consume_task(tool_args)
                     if isinstance(tool_args,dict):
                         if getattr(self,'attachments',None) and self.attachments.enabled() and event.get_extra('qq_attachment_snapshot'):await self.attachments.select_references(event,tool_args)
                         elif self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
                         else:tool_args.pop('use_previous_reference',None)
+                    if contract:
+                        activity=getattr(self,'model_activity',None)
+                        if activity:activity.emit('image_task_validated',**event_trace(event),task_type=task_meta['operation'],reference_count=task_meta['reference_count'],validation_code='ok',seconds=task_meta['validation_ms']/1000)
                     if self.router.settings.get('image_context_enabled',True) and not event.get_extra('qq_diagnostic') and event.get_extra('qq_context_backend')!='contextaware':
                         tool_started(self,event,tool)
                         self.save_context()
@@ -454,8 +472,10 @@ class PersonaModelBindings(Star):
                     if not isinstance(tool_args,dict):raise
                     tool_args.pop('reference_ids',None);tool_args.pop('use_previous_reference',None)
                     tool_args[IMAGE_GUARD_ERROR]=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else '参考图检查失败：'+type(exc).__name__
+                    if event.get_extra('qq_image_task_contract_enabled') and failures:
+                        failures.validation_rejected(event,getattr(exc,'code','reference_unavailable'))
                     activity=getattr(self,'model_activity',None)
-                    if activity:activity.emit('image_guard_rejected',**event_trace(event),purpose='image_reference_selection',outcome='image_not_executed',error_type=type(exc).__name__)
+                    if activity:activity.emit('image_guard_rejected',**event_trace(event),purpose='image_reference_selection',outcome='image_not_executed',error_type=type(exc).__name__,validation_code=getattr(exc,'code','reference_unavailable'))
                     return
                 event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
                 if failures:failures.started(event)
@@ -495,6 +515,8 @@ class PersonaModelBindings(Star):
         event.set_extra('qq_image_pending_notice_sent',True)
         try:
             await event.send(event.plain_result(text))
+            activity=getattr(self,'model_activity',None)
+            if activity:activity.emit('image_notice_sent',**event_trace(event),notice_source=event.get_extra('qq_deferred_notice_source') or event.get_extra('qq_image_notice_source'),outcome='notice_delivered')
             self.record_dialogue_progress(event,text,'image_notice')
         except Exception as exc:
             # A failed courtesy message must not abort paid image generation.
@@ -667,11 +689,11 @@ class PersonaModelBindings(Star):
         apply_existing_meme_policy(request, event.get_message_str())
         notice=self.config.get('image_pending_notice',{})
         model_notice=notice.get('enabled',True) and notice.get('model_generated',True)
-        prepare_chat_image_tools(request,model_notice=model_notice,contextual_reference=bool(event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count')),indexed_references=indexed)
-        if event.get_extra('qq_context_backend')=='contextaware':
-            for tool in getattr(getattr(request,'func_tool',None),'tools',[]):
-                if tool.name in ('generate_image','generate_selfie'):
-                    tool.parameters.setdefault('properties',{})['reference_notes']={'type':'array','maxItems':4,'items':{'type':'object','properties':{'image_id':{'type':'string'},'purpose':{'type':'string'}},'required':['image_id','purpose']},'description':'可选：逐张说明所选图片的用途，例如身份设定、物件、姿态、编辑底稿。与reference_ids一一对应；不相关的图不选。'}
+        prepare_chat_image_tools(request,model_notice=model_notice,contextual_reference=bool(event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count')),indexed_references=indexed,task_contract=indexed)
+        event.set_extra('qq_image_task_contract_enabled',indexed)
+        event.set_extra('qq_image_notice_defer_enabled',model_notice)
+        if indexed:
+            request.system_prompt=(request.system_prompt or '')+'\n[图片任务与素材一致性]\n图片工具必须在同一次调用给出image_task、reference_ids、reference_notes和pending_message。先根据用户原话与上下文判断independent独立新图、edit修改已有图、reference参考创作，并用reason简述依据。edit/reference必须选择真实参考图及逐图用途；“把它变成…”等指代需要联系先前素材，不可因尚未找到图而改成independent或空参考。需要来源时先查目录/历史，理解像素时再看图；缺失或歧义无法解决就澄清。independent仅用于用户要独立创作，independent_quote逐字引用本条请求支持这一判断的原话，参考集合和用途均填[]。不要只因用户没再次附图就当成新任务。开工对白只放pending_message，程序校验通过才发送；不要先在普通正文承诺已采用尚未选定的原图。不要为通过校验改变任务含义。\n'
         failures=getattr(self,'image_failure_policy',None)
         if failures:failures.track(event,request)
         image_tools_available=bool(getattr(request,'func_tool',None) and {'generate_image','generate_selfie'}.intersection(request.func_tool.names()))
@@ -725,6 +747,8 @@ class PersonaModelBindings(Star):
             self.record_dialogue_progress(event,'[图片参数校验未通过，本次未调用图片模型；此前图片任务状态未改变。]','image_tool_status')
             return
         status=result_state(tool_result)
+        if status=='sent' and event.get_extra('qq_image_task_state') is not None:
+            complete_task(event.get_extra('qq_image_task_state'))
         summaries={'sent':'[图片工具已报告成功下发图片；这是执行状态，不是图片内容或聊天原话。]',
             'failed':'[图片工具执行失败；这是执行状态，不是聊天原话。]',
             'result_unconfirmed':'[图片工具已返回，图片是否发送尚未确认；这是执行状态。]'}
