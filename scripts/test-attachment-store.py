@@ -82,5 +82,34 @@ class StoreTests(unittest.TestCase):
     def test_public_catalog_never_contains_private_source(self):
         self.record();self.assertNotIn('private',str(self.store.snapshot('s')))
 
+    def test_browser_includes_image_only_and_empty_text_events(self):
+        a=self.store.record('s','bot:G','image-only','A','A','',[{'type':'image','ordinal':0}])
+        rows=self.store.browse(self.store.snapshot('s'))['messages']
+        self.assertEqual(rows[0]['message_id'],'image-only');self.assertEqual(rows[0]['attachments'][0]['id'],a['ids'][0])
+
+    def test_browser_cursor_boundary_scope_and_filters(self):
+        for i in range(6):self.record(mid='m'+str(i))
+        snap=self.store.snapshot('s');first=self.store.browse(snap,limit=2)
+        self.record(mid='future');second=self.store.browse(snap,limit=2,cursor=first['next_cursor'])
+        self.assertFalse(set(r['message_id'] for r in first['messages'])&set(r['message_id'] for r in second['messages']))
+        self.assertNotIn('future',str(second))
+        for wrong,kw in [(self.store.snapshot('other'),{}),(snap,{'sender_id':'B'}),(snap,{'direction':'newer'})]:
+            with self.assertRaises(ValueError):self.store.browse(wrong,cursor=first['next_cursor'],**kw)
+
+    def test_browser_timestamp_sender_reply_filters(self):
+        self.store.record('s','bot:G','a','A','A','one',[]);self.now+=10
+        self.store.record('s','bot:G','b','B','B','two',[{'type':'reply','message_id':'a'}]);self.now+=10
+        self.store.record('s','bot:G','c','A','A','three',[])
+        snap=self.store.snapshot('s')
+        self.assertEqual([r['message_id'] for r in self.store.browse(snap,sender_id='B',reply_to='a',since=1005,until=1015)['messages']],['b'])
+        self.assertEqual([r['message_id'] for r in self.store.browse(snap,direction='newer',limit=2)['messages']],['a','b'])
+
+    def test_browser_literal_like_and_reset(self):
+        self.store.record('s','bot:G','percent','A','A','100%_literal',[]);self.record(mid='other')
+        snap=self.store.snapshot('s');found=self.store.browse(snap,query='%_')
+        self.assertEqual([r['message_id'] for r in found['messages']],['percent'])
+        self.store.invalidate('s')
+        with self.assertRaises(ValueError):self.store.browse(snap)
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

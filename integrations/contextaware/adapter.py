@@ -93,7 +93,7 @@ class CandidateBackend:
     def __init__(self, ca_module, context, config, identity: Callable):
         self.identity = identity
         self.routing_context = RoutingContext(context)
-        # Construction/import occurs only in the isolated evaluation process.
+        # The managed loader suppresses global registration; hooks are explicit.
         self.plugin = ca_module.Main(self.routing_context, config)
         self.plugin._scene_generator = FactScene()
         self.module = ca_module

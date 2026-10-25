@@ -169,6 +169,43 @@ class AttachmentStore:
     def freeze(self,snapshot,ids,task_id):
         with self.lock:return self._freeze(snapshot,ids,task_id)
 
+    def browse(self,snapshot,query='',sender_id='',reply_to='',since=0,until=0,cursor='',direction='older',limit=5):
+        """Browse original events, including image-only messages, in one scope."""
+        import base64
+        import math
+        if self.epoch(snapshot['scope'])!=snapshot['epoch']:raise ValueError('本轮会话已失效')
+        if direction not in ('older','newer'):raise ValueError('direction必须为older或newer')
+        limit=max(1,min(int(limit),10));since=float(since or 0);until=float(until or 0)
+        if not math.isfinite(since) or not math.isfinite(until) or since<0 or until<0 or until and since>until:raise ValueError('时间范围无效')
+        filters=[str(query)[:160],str(sender_id)[:120],str(reply_to)[:120],since,until]
+        fingerprint=hashlib.sha256(json.dumps(filters,ensure_ascii=False).encode()).hexdigest()[:16]
+        anchor=snapshot['seq']+1 if direction=='older' else 0
+        if cursor:
+            if not isinstance(cursor,str) or len(cursor)>4096:raise ValueError('分页游标无效')
+            try:token=json.loads(base64.urlsafe_b64decode(cursor+'='*(-len(cursor)%4)))
+            except Exception:raise ValueError('分页游标无效') from None
+            if not isinstance(token,list) or len(token)!=6 or token[:3]!=[snapshot['scope'],snapshot['epoch'],snapshot['seq']] or token[4:]!=[direction,fingerprint] or type(token[3]) is not int:raise ValueError('游标不属于本轮范围或筛选条件')
+            anchor=token[3]
+        sql='SELECT seq,message_id FROM events WHERE scope=? AND epoch=? AND seq<=? AND seq'+(' < ?' if direction=='older' else ' > ?')
+        args=[snapshot['scope'],snapshot['epoch'],snapshot['seq'],anchor]
+        if query:
+            sql+=" AND text LIKE ? ESCAPE '\\'"
+            args.append('%'+str(query)[:160].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%')
+        if sender_id:sql+=' AND sender=?';args.append(str(sender_id))
+        if since:sql+=' AND received>=?';args.append(since)
+        if until:sql+=' AND received<=?';args.append(until)
+        if reply_to:
+            sql+=" AND EXISTS (SELECT 1 FROM json_each(events.parts) p WHERE json_extract(p.value,'$.type')='reply' AND json_extract(p.value,'$.message_id')=?)"
+            args.append(str(reply_to))
+        sql+=' ORDER BY seq '+('DESC' if direction=='older' else 'ASC')+' LIMIT ?'
+        with self.db() as db:rows=db.execute(sql,(*args,limit+1)).fetchall()
+        more=len(rows)>limit;rows=rows[:limit];messages=[]
+        for row in rows:messages.extend(self.messages(snapshot,message_id=row['message_id'],limit=1))
+        token=[snapshot['scope'],snapshot['epoch'],snapshot['seq'],rows[-1]['seq'],direction,fingerprint] if more and rows else None
+        return {'messages':list(reversed(messages)) if direction=='older' else messages,
+                'next_cursor':base64.urlsafe_b64encode(json.dumps(token,ensure_ascii=False).encode()).decode().rstrip('=') if token else '',
+                'direction':direction,'has_more':more,'snapshot_boundary':snapshot['seq']}
+
     def _freeze(self,snapshot,ids,task_id):
         rows=self.resolve(snapshot,ids,'image')
         key=hashlib.sha256(json.dumps([snapshot['scope'],snapshot['epoch'],str(task_id)]).encode()).hexdigest()[:24]

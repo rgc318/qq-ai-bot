@@ -12,6 +12,11 @@ async def verify_model_logging():
     event=SimpleNamespace(get_extra=lambda k:extras.get(k),set_extra=lambda k,v:extras.update({k:v}),get_group_id=lambda:'group',message_obj=SimpleNamespace(message_id='fixture'))
     trace_id=event_trace(event)['trace'];extras['user_policy_effective_persona_id']='B'
     checks['stable_trace_and_final_persona']=event_trace(event)['trace']==trace_id and event_trace(event)['persona']=='B'
+    extras['qq_context_backend_lease']=SimpleNamespace(backend='contextaware',generation=3)
+    checks['backend_and_generation_tagged']=event_trace(event)['backend']=='contextaware' and event_trace(event)['generation']==3
+    minimal={}
+    stripped=SimpleNamespace(get_extra=lambda k:minimal.get(k),set_extra=lambda k,v:minimal.update({k:v}),get_group_id=lambda:'fixture')
+    checks['stripped_diagnostic_event_has_safe_trace']=event_trace(stripped)['message']==''
     observer=ModelActivityLogger({'heartbeat_seconds':.01,'heartbeat_repeat_seconds':.015},rows.append)
     class Provider:
         provider_config={'id':'fake-provider','model':'fake-model','api_key':'SECRET_KEY_SENTINEL'}

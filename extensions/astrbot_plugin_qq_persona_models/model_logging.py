@@ -19,14 +19,17 @@ def event_trace(event):
     decision=event.get_extra('user_policy_decision')
     persona=str(event.get_extra('user_policy_effective_persona_id') or getattr(decision,'persona_id',''))
     trace=event.get_extra('qq_model_trace')
+    lease=event.get_extra('qq_context_backend_lease')
     if trace:
         if persona:trace['persona']=persona
         if event.get_extra('qq_diagnostic'):trace['diagnostic']=True
+        if lease:trace.update(backend=lease.backend,generation=lease.generation)
         return trace
     trace={'trace':uuid4().hex[:12],'group':str(event.get_group_id() or ''),
-           'message':str(getattr(event.message_obj,'message_id','') or ''),
+           'message':str(getattr(getattr(event,'message_obj',None),'message_id','') or ''),
            'persona':persona,
            'diagnostic':bool(event.get_extra('qq_diagnostic'))}
+    if lease:trace.update(backend=lease.backend,generation=lease.generation)
     event.set_extra('qq_model_trace',trace)
     event.set_extra('qq_model_trace_started',time.monotonic())
     return trace
@@ -102,7 +105,7 @@ class ModelActivityLogger:
                  'image_source','source_message',
                  'attachment_count','attachment_ids','source_hashes','cache_hit',
                  'recipient','confidence','judge_recent_messages','judge_recent_chars',
-                 'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds'}
+                 'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds','backend','generation'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}
         for k,v in list(row.items()):
             if isinstance(v,str):row[k]=v.replace('\n',' ').replace('\r',' ')[:240]
@@ -206,6 +209,10 @@ class ModelActivityLogger:
                 match=re.search(r'\bHTTP\s+(\d{3})\b',str(exc)[:500])
                 if match:status=int(match[1])
             if isinstance(status,int):meta['http_status']=status
+            observer=getattr(self,'image_failure_observer',None)
+            if meta.get('kind')=='image' and observer:
+                try:observer(meta,exc)
+                except Exception:pass
         if record['first'] is not None:meta['first_output_seconds']=record['first']
         self.active.pop(meta['call'],None);self.counts[state]+=1
         self.recent.append(self.emit(state,**meta))

@@ -12,6 +12,7 @@ import time
 from deployment_api import DeploymentAPI,write_report
 
 ROOT=Path(__file__).resolve().parents[1]
+raise SystemExit('Historical 1.8 installer retired. Use scripts/deploy-context-runtime.py for the bundled runtime.')
 NAME='astrbot_plugin_qq_persona_models'
 VERSION='1.8.1'
 CONTAINER='qq-ai-bot-astrbot-1'

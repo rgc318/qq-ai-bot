@@ -25,16 +25,21 @@ class ArchiveRestorer:
         self.maps = {}
         self.locks = {}
 
-    async def hydrate(self, event):
+    async def hydrate(self, event, boundary=None, include_ids=()):
         view = self.backend.scoped(event)
         lock = self.locks.setdefault(view.scope, asyncio.Lock())
         async with lock:
-            return await self._hydrate(view)
+            return await self._hydrate(view,boundary,include_ids)
 
-    async def _hydrate(self, view):
+    async def _hydrate(self, view,boundary,include_ids):
         plugin = self.backend.plugin
         index = plugin._image_index
-        snapshot = await asyncio.to_thread(self.store.snapshot, view.scope, index.per_session)
+        snapshot = await asyncio.to_thread(self.store.snapshot, view.scope, index.per_session,boundary)
+        for asset_id in include_ids:
+            if asset_id not in snapshot['ids']:
+                row=await asyncio.to_thread(self.store.source,snapshot['scope'],snapshot['epoch'],asset_id)
+                if row['seq']>snapshot['seq']:raise ValueError('附件晚于本轮消息快照')
+                snapshot['ids'].append(asset_id);snapshot['catalog'].append(self.store.public(row))
         key = (view.scope, snapshot['epoch'])
         state = self.maps.get(view.scope)
         if state and state['key'] != key:
@@ -49,7 +54,8 @@ class ArchiveRestorer:
         index.epoch(view.unified_msg_origin)
         imported = 0
         # No selection is inferred from message content; retain original order.
-        wanted = [a['id'] for a in snapshot['catalog'] if a['type'] == 'image' and a['state'] == 'ready']
+        wanted = [a['id'] for a in snapshot['catalog'] if a['type'] == 'image' and a['state'] == 'ready'
+                  and not index.get(view.unified_msg_origin,ids.get(a['id'],''))]
         rows = await asyncio.to_thread(self.store.resolve, snapshot, wanted, 'image', 80) if wanted else []
         for row in sorted(rows, key=lambda row: (row['seq'], row['ordinal'])):
             archive_id = row['id']
@@ -67,7 +73,7 @@ class ArchiveRestorer:
                         r = db.execute('SELECT sender FROM events WHERE scope=? AND epoch=? AND seq=?',
                                        (view.scope, snapshot['epoch'], request_order)).fetchone()
                         return r['sender'] if r else ''
-                requester = await asyncio.to_thread(find_requester)
+                requester = source.get('requested_by') or await asyncio.to_thread(find_requester)
             message = SimpleNamespace(msg_id='archive:'+archive_id,
                 sender_id=requester, sender_name=row['name'], timestamp=row['created'],
                 is_bot=False, has_gif=False, image_count=1, image_urls=['retained-archive'])
@@ -84,8 +90,7 @@ class ArchiveRestorer:
                 resource.source = ''
                 resource.data = data
                 # Preserve the real original source, not a synthetic platform ID.
-                resource.entry = replace(resource.entry, message_id=row['message_id'],
-                                         ordinal=row['ordinal']+1)
+                resource.entry = replace(resource.entry, message_id=row['message_id'])
                 ids[archive_id] = native_id
                 imported += 1
                 plugin._recall_sequence = max(plugin._recall_sequence, row['seq'])

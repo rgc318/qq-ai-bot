@@ -18,14 +18,14 @@ from .document_reader import read_excerpt
 from .image_followup import local_image_path,public_activity
 from .recent_uploads import _REF,_NEW
 
-TOOL_NAMES={'read_group_message','view_context_images','read_context_document'}
+TOOL_NAMES={'read_group_message','view_context_images','read_context_document','browse_group_history'}
 
 
 class AttachmentToolLogFilter:
     """Hide only our textual tool results from logs, never from model inputs."""
     def filter(self,record):
         message=record.getMessage()
-        for name in ('read_group_message','read_context_document'):
+        for name in ('read_group_message','read_context_document','browse_group_history'):
             prefix='Tool `'+name+'` Result: '
             if message.startswith(prefix):
                 record.msg=prefix+'[正文在日志中省略；实际内容已交给模型，字符数='+str(len(message)-len(prefix))+']'
@@ -46,7 +46,7 @@ class AttachmentContext:
         activity=getattr(self.plugin,'model_activity',None)
         if activity:
             from .model_logging import event_trace
-            activity.emit(state,**event_trace(event),purpose='attachment_context',**fields)
+            activity.emit(state,**{**event_trace(event),'purpose':'attachment_context',**fields})
 
     def identity(self,event,allow_stopped=False):
         return self.plugin.attachment_identity(event,allow_stopped=allow_stopped)
@@ -417,7 +417,8 @@ class AttachmentContext:
                     components=getattr(chain,'chain',[]) or []
                     parts=service.descriptors(event,components,generated=True)
                     for part in parts:
-                        if 'source' in part:part['source']['request_seq']=snapshot['seq']
+                        if 'source' in part:
+                            part['source'].update(request_seq=snapshot['seq'],requested_by=str(event.get_sender_id()),conversation_id=str(getattr(getattr(event.get_extra('provider_request'),'conversation',None),'cid','') or ''))
                     if not any(p['type']=='image' for p in parts):return receipt
                     mid=str(receipt.get('message_id')) if isinstance(receipt,dict) and receipt.get('message_id') else 'sent:'+str(getattr(event.message_obj,'message_id',''))+':'+str(ordinal)
                     record=await asyncio.to_thread(service.store.record,snapshot['scope'],event.unified_msg_origin,mid,str(event.get_self_id()),'AI','[已成功发送生成图片]',parts,'generated',event.get_extra('qq_attachment_parent_ids') or [],snapshot['epoch'])

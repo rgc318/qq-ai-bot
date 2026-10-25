@@ -15,7 +15,8 @@ async def verify_image_pending_notice(plugin):
         async def send(result):
             if fail:raise RuntimeError('Synthetic send failure')
             captured.append(result)
-        ev=SimpleNamespace(plugins_name=None,is_stopped=lambda:False,is_private_chat=lambda:private,get_group_id=lambda:group_id,get_sender_id=lambda:'diagnostic-user',get_self_id=lambda:'diagnostic-bot',get_extra=lambda k,default=None:extra.get(k,default),set_extra=lambda k,v:extra.__setitem__(k,v),send=send,plain_result=lambda text:text)
+        message=SimpleNamespace(message_id='synthetic-notice',message=[])
+        ev=SimpleNamespace(message_obj=message,get_messages=lambda:message.message,plugins_name=None,is_stopped=lambda:False,is_private_chat=lambda:private,get_group_id=lambda:group_id,get_sender_id=lambda:'diagnostic-user',get_self_id=lambda:'diagnostic-bot',get_extra=lambda k,default=None:extra.get(k,default),set_extra=lambda k,v:extra.__setitem__(k,v),send=send,plain_result=lambda text:text)
         return ev,captured
     async def start(ev,name,args=None):
         await MAIN_AGENT_HOOKS.on_tool_start(SimpleNamespace(context=SimpleNamespace(event=ev)),SimpleNamespace(name=name),args or {})

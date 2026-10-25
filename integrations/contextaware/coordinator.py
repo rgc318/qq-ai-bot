@@ -1,6 +1,6 @@
 """Exclusive context backend lifecycle, independent of AstrBot's global hooks.
 
-This controller is tested in isolation, not connected to production hooks yet.
+The production facade pins each ingress to this controller's request lease.
 Adapters must activate/deactivate ALL their hooks/tools through the supplied
 callback. Readiness is explicit; no silent substitution of an unavailable mode.
 """
