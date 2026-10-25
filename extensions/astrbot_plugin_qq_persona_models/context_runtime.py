@@ -125,7 +125,8 @@ class ContextRuntime:
                     'qq_ca_selected_ids','qq_context_capture_ms','qq_attachment_snapshot','qq_context_backend',
                     'qq_image_failure_state','qq_image_tools_started','qq_image_pending_notice_attempted',
                     'qq_model_trace','qq_model_trace_started','qq_image_task_state','qq_image_task_contract_enabled',
-                    'qq_image_notice_defer_enabled','qq_deferred_notice_source'):
+                    'qq_image_notice_defer_enabled','qq_deferred_notice_source','qq_image_batch_enabled',
+                    'qq_image_batch_plan','qq_image_batch_report','qq_image_batch_serial','qq_image_batch_delivery','qq_image_batch_signal'):
             event.set_extra(key,None)
 
     def finish_dispatch(self,event,lease):

@@ -106,7 +106,8 @@ class ModelActivityLogger:
                  'attachment_count','attachment_ids','source_hashes','cache_hit',
                  'recipient','confidence','judge_recent_messages','judge_recent_chars',
                  'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds','backend','generation',
-                 'task_type','reference_count','validation_code','repair_attempts','notice_source'}
+                 'task_type','reference_count','validation_code','repair_attempts','notice_source',
+                 'batch_id','batch_index','requested_images','attempted_images','delivered_images'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}
         for k,v in list(row.items()):
             if isinstance(v,str):row[k]=v.replace('\n',' ').replace('\r',' ')[:240]

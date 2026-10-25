@@ -31,9 +31,11 @@ from .image_followup import hydrate_image_turn,capture_turn,attach_followup,tool
 from .image_failure_policy import ImageFailurePolicy
 from .image_task_contract import validate_task,consume_task,complete_task
 from .image_response_adapter import ImageResponseAdapter
+from .image_batch import ImageBatchAdapter,validate_batch
+from .image_batch_timeout import ImageTimeoutAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.10.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -48,6 +50,8 @@ class PersonaModelBindings(Star):
         self.image_execution_guard=ImageExecutionGuard()
         self.image_failure_policy=ImageFailurePolicy()
         self.image_response_adapter=ImageResponseAdapter()
+        self.image_batch_adapter=ImageBatchAdapter(self)
+        self.image_timeout_adapter=ImageTimeoutAdapter()
         self.chat_history_store=None
         self.history_job=None
         self.history_bootstrap={}
@@ -58,6 +62,8 @@ class PersonaModelBindings(Star):
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
         self.model_activity.install(self.context)
+        self.image_batch_adapter.install(self.context)
+        self.image_timeout_adapter.install(self.context)
         self.image_response_adapter.install()
         self.cache_path=StarTools.get_data_dir('astrbot_plugin_qq_persona_models')/'reply_context.json'
         archive=await asyncio.to_thread(AttachmentContext,self,self.cache_path.parent/'multimodal',dict(self.config.get('multimodal_context',{})))
@@ -88,6 +94,11 @@ class PersonaModelBindings(Star):
         self.context.register_web_api('/qq_persona_models/context_backend/switch',self.switch_context_backend,['POST'],'空闲时切换唯一上下文后端，不调用模型')
         self.context.register_web_api('/astrbot_plugin_qq_persona_models/context_backend/status',self.context_backend_status,['GET'],'页面查看上下文后端状态')
         self.context.register_web_api('/astrbot_plugin_qq_persona_models/context_backend/switch',self.switch_context_backend,['POST'],'页面空闲切换上下文后端')
+        self.context.register_web_api('/qq_persona_models/image_batch/status',self.image_batch_status,['GET'],'查看多图上限和适配器状态，不调用模型')
+
+    async def image_batch_status(self):
+        from quart import jsonify
+        return jsonify({'status':'ok','data':{'ready':self.image_batch_adapter.ready,'max_images_per_request':4,'max_image_attempts':5,'concurrency':self.image_batch_adapter.concurrency,'timeouts_ready':self.image_timeout_adapter.ready,'image_tool_timeout_seconds':600}})
 
     async def context_backend_status(self):
         from quart import jsonify
@@ -106,6 +117,8 @@ class PersonaModelBindings(Star):
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
         self.model_activity.install(self.context)
+        if getattr(self,'image_batch_adapter',None):self.image_batch_adapter.install(self.context)
+        if getattr(self,'image_timeout_adapter',None):self.image_timeout_adapter.install(self.context)
         if getattr(self,'attachments',None):self.attachments.install_outgoing()
         if getattr(metadata,'name','')=='astrbot_plugin_user_policy':
             self.start_history_bootstrap()
@@ -113,6 +126,8 @@ class PersonaModelBindings(Star):
     async def terminate(self):
         if getattr(self,'attachments',None):await self.attachments.close()
         self.image_execution_guard.restore()
+        self.image_batch_adapter.close()
+        self.image_timeout_adapter.close()
         self.image_response_adapter.restore()
         self.model_activity.restore()
         self.image_upload_adapter.restore()
@@ -334,6 +349,9 @@ class PersonaModelBindings(Star):
     async def verify_memory_meme(self):
         from quart import jsonify, request
         payload=await request.get_json(silent=True) or {}
+        if payload.get('image_batch_only'):
+            from .image_batch_checks import verify_image_batches
+            return jsonify({'status':'ok','data':await verify_image_batches()})
         if payload.get('image_task_only'):
             from .image_task_checks import verify_image_tasks
             return jsonify({'status':'ok','data':await verify_image_tasks()})
@@ -450,7 +468,9 @@ class PersonaModelBindings(Star):
                 selected=tool_args.get('use_previous_reference') if isinstance(tool_args,dict) else None
                 try:
                     failures=getattr(self,'image_failure_policy',None)
-                    if failures:failures.check(event)
+                    batch=validate_batch(tool_args) if event.get_extra('qq_image_batch_enabled') else {'count':1,'prompts':()}
+                    if event.get_extra('qq_image_task_contract_enabled') and not event.get_extra('qq_image_batch_enabled') and (tool_args.get('count',1)!=1 or tool_args.get('image_prompts')):raise ValueError('批量适配尚未就绪，本次只能生成1张')
+                    if failures:failures.check(event,batch['count'])
                     contract=bool(event.get_extra('qq_image_task_contract_enabled'))
                     task_meta={}
                     if contract:
@@ -458,6 +478,7 @@ class PersonaModelBindings(Star):
                         if state is None:state={};event.set_extra('qq_image_task_state',state)
                         task_meta=validate_task(tool_args,event.get_message_str(),state)
                     consume_task(tool_args)
+                    tool_args.pop('image_prompts',None)
                     if isinstance(tool_args,dict):
                         if getattr(self,'attachments',None) and self.attachments.enabled() and event.get_extra('qq_attachment_snapshot'):await self.attachments.select_references(event,tool_args)
                         elif self.router.settings.get('image_context_enabled',True):select_previous_reference(event.get_extra('qq_image_followup_probe') or self,event,tool_args)
@@ -465,6 +486,10 @@ class PersonaModelBindings(Star):
                     if contract:
                         activity=getattr(self,'model_activity',None)
                         if activity:activity.emit('image_task_validated',**event_trace(event),task_type=task_meta['operation'],reference_count=task_meta['reference_count'],validation_code='ok',seconds=task_meta['validation_ms']/1000)
+                    if event.get_extra('qq_image_batch_enabled'):
+                        event.set_extra('qq_image_batch_plan',batch);event.set_extra('qq_image_batch_report',None)
+                        signal=event.get_extra('qq_image_batch_signal')
+                        if signal:signal.set()
                     if self.router.settings.get('image_context_enabled',True) and not event.get_extra('qq_diagnostic') and event.get_extra('qq_context_backend')!='contextaware':
                         tool_started(self,event,tool)
                         self.save_context()
@@ -478,7 +503,7 @@ class PersonaModelBindings(Star):
                     if activity:activity.emit('image_guard_rejected',**event_trace(event),purpose='image_reference_selection',outcome='image_not_executed',error_type=type(exc).__name__,validation_code=getattr(exc,'code','reference_unavailable'))
                     return
                 event.set_extra('qq_image_tools_started',(event.get_extra('qq_image_tools_started') or 0)+1)
-                if failures:failures.started(event)
+                if failures:failures.started(event,batch['count'])
                 activity=getattr(self,'model_activity',None)
                 if activity:
                     omni=self.context.get_registered_star('astrbot_plugin_omnidraw').star_cls
@@ -689,11 +714,16 @@ class PersonaModelBindings(Star):
         apply_existing_meme_policy(request, event.get_message_str())
         notice=self.config.get('image_pending_notice',{})
         model_notice=notice.get('enabled',True) and notice.get('model_generated',True)
-        prepare_chat_image_tools(request,model_notice=model_notice,contextual_reference=bool(event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count')),indexed_references=indexed,task_contract=indexed)
+        batch_enabled=bool(indexed and getattr(getattr(self,'image_batch_adapter',None),'ready',False))
+        prepare_chat_image_tools(request,model_notice=model_notice,contextual_reference=bool(event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count')),indexed_references=indexed,task_contract=indexed,batch_images=batch_enabled)
+        event.set_extra('qq_image_batch_enabled',batch_enabled)
+        if batch_enabled and event.get_extra('qq_image_batch_signal') is None:event.set_extra('qq_image_batch_signal',asyncio.Event())
         event.set_extra('qq_image_task_contract_enabled',indexed)
         event.set_extra('qq_image_notice_defer_enabled',model_notice)
         if indexed:
             request.system_prompt=(request.system_prompt or '')+'\n[图片任务与素材一致性]\n图片工具必须在同一次调用给出image_task、reference_ids、reference_notes和pending_message。先根据用户原话与上下文判断independent独立新图、edit修改已有图、reference参考创作，并用reason简述依据。edit/reference必须选择真实参考图及逐图用途；“把它变成…”等指代需要联系先前素材，不可因尚未找到图而改成independent或空参考。需要来源时先查目录/历史，理解像素时再看图；缺失或歧义无法解决就澄清。independent仅用于用户要独立创作，independent_quote逐字引用本条请求支持这一判断的原话，参考集合和用途均填[]。不要只因用户没再次附图就当成新任务。开工对白只放pending_message，程序校验通过才发送；不要先在普通正文承诺已采用尚未选定的原图。不要为通过校验改变任务含义。\n'
+        if batch_enabled:
+            request.system_prompt=(request.system_prompt or '')+'\n[独立多图]\n用户要多张图片时，count填独立图片张数，最多4张；不要把多张需求擅自拼成一张多格图。超过4张先说明上限并请用户分批发请求，不自行后台排队，不声称已经完成全部。相同主题的多个版本可一次调用count=N，image_prompts填[]。不同画面一次给出image_prompts，逐张完整描述且长度必须等于count；prompt/action仅提供共享风格、约束和参考用途。同一批共用相同参考集合，需要不同集合时分次调用，一轮累计最多交付4张，失败补试也有预算。开工对白自然说明这批任务。结果按编号报告真实发送/失败，不重复生成已成功图片；不承诺后台自动补发。\n'
         failures=getattr(self,'image_failure_policy',None)
         if failures:failures.track(event,request)
         image_tools_available=bool(getattr(request,'func_tool',None) and {'generate_image','generate_selfie'}.intersection(request.func_tool.names()))
@@ -741,13 +771,18 @@ class PersonaModelBindings(Star):
     async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
         if not self.scoped_group(event) or event.get_extra('qq_diagnostic') or getattr(tool,'name','') not in ('generate_image','generate_selfie'):return
         failures=getattr(self,'image_failure_policy',None)
+        report=event.get_extra('qq_image_batch_report')
+        if report and not report.get('reported') and hasattr(tool_result,'content'):
+            from mcp.types import TextContent
+            tool_result.content.append(TextContent(type='text',text='[本批逐张执行结果]'+json.dumps({k:report[k] for k in ('batch_id','requested','items')},ensure_ascii=False)+'。sent才表示已发送；失败项和未确认发送的图不能声称已交付。'))
+            report['reported']=True
         if failures:failures.feedback(event,tool_result)
         rejected=any(str(getattr(c,'text','')).startswith('系统提示：画图未执行（') for c in getattr(tool_result,'content',[]) or [])
         if rejected or isinstance(tool_args,dict) and tool_args.get(IMAGE_GUARD_ERROR):
             self.record_dialogue_progress(event,'[图片参数校验未通过，本次未调用图片模型；此前图片任务状态未改变。]','image_tool_status')
             return
         status=result_state(tool_result)
-        if status=='sent' and event.get_extra('qq_image_task_state') is not None:
+        if status=='sent' and (not report or all(i['status']=='sent' for i in report['items'])) and event.get_extra('qq_image_task_state') is not None:
             complete_task(event.get_extra('qq_image_task_state'))
         summaries={'sent':'[图片工具已报告成功下发图片；这是执行状态，不是图片内容或聊天原话。]',
             'failed':'[图片工具执行失败；这是执行状态，不是聊天原话。]',

@@ -5,6 +5,7 @@ No history/config migration. Backups stay in the same AstrBot data volume.
 """
 from datetime import datetime
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -21,15 +22,19 @@ CONTAINER='qq-ai-bot-astrbot-1'
 LIVE='/AstrBot/data/plugins/'+NAME
 DATA='/AstrBot/data/plugin_data/'+NAME
 SOURCE=DATA+'/contextaware-source'
-VERSION='1.10.0'
+VERSION='1.11.0'
 api=DeploymentAPI()
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--baseline',choices=('1.8.1','1.9.0','1.10.0'),default='1.9.0',help='Explicitly reviewed live version')
+parser.add_argument('--baseline',choices=('1.8.1','1.9.0','1.10.0','1.11.0'),default='1.10.0',help='Explicitly reviewed live version')
 args=parser.parse_args()
 CONFIG='/api/v1/plugins/'+NAME+'/config'
 before_config=api.call(CONFIG)['data']['config']
 assert before_config['reply_conditions']['allowed_groups']==['347440128'],'Scope expansion is forbidden'
 assert before_config.get('multimodal_context',{}).get('enabled'),'Existing shared archive must be enabled'
+OMNI_CONFIG='/api/v1/plugins/astrbot_plugin_omnidraw/config'
+before_omni=api.call(OMNI_CONFIG)['data']['config']
+next_omni=deepcopy(before_omni);next_omni.setdefault('optimizer_config',{})['max_batch_count']=4
+assert before_omni.get('optimizer_config',{}).get('max_batch_count') in (1,4),'Review unexpected batch baseline'
 
 
 def docker(*args):
@@ -51,7 +56,7 @@ def idle():
         proactive=proactive.get('data',proactive)
         queued=any(proactive.get('tasks',{}).get(k,0) for k in ('delay','running_check')) or bool(proactive.get('gate',{}).get('running'))
         owned=False
-        if plugin()['version'] in ('1.9.0','1.10.0'):
+        if plugin()['version'] in ('1.9.0','1.10.0','1.11.0'):
             runtime=backend();owned=runtime['active_requests'] or runtime['pending_messages'] or runtime['switching']
         stable=0 if active or queued or owned else stable+1
         if stable>=3:return
@@ -80,6 +85,11 @@ stamp=datetime.now().strftime('%Y%m%d-%H%M%S')
 backup='/AstrBot/data/temp/context-runtime-backup-'+stamp
 report={'version':VERSION,'backup':backup,'checks':{},'model_calls':0,'image_generations':0,'qq_messages_sent':0}
 api.backup('context-runtime-config-before-'+stamp+'.json',before_config)
+api.backup('multi-image-omnidraw-before-'+stamp+'.json',before_omni)
+native_hashes=json.loads((ROOT/'downloads/omnidraw-native-source/test-source-hashes.json').read_text(encoding='utf-8'))
+current_hashes=json.loads(py('import json,hashlib;from pathlib import Path;r=Path("/AstrBot/data/plugins/astrbot_plugin_omnidraw");names='+repr(list(native_hashes))+';print(json.dumps({n:hashlib.sha256((r/n).read_bytes()).hexdigest() for n in names}))'))
+assert current_hashes==native_hashes,'OmniDraw source changed since native wire tests'
+report['checks']['omnidraw_source_matches_native_test']=True
 lock=json.loads((ROOT/'integrations/contextaware/source-lock.json').read_text(encoding='utf-8'))
 source=ROOT/'downloads/contextaware-f026c56'
 for name,entry in lock['files'].items():
@@ -87,6 +97,7 @@ for name,entry in lock['files'].items():
     assert hashlib.sha256((source/name).read_bytes()).hexdigest()==entry['sha256'],name
 
 changed=False
+omni_changed=False
 try:
     with TemporaryDirectory(dir=ROOT/'downloads',prefix='context-runtime-stage-') as temp:
         stage=Path(temp);target=stage/'next'
@@ -110,17 +121,23 @@ try:
        'assert live.parent==Path("/AstrBot/data/plugins") and b.parent==Path("/AstrBot/data/temp");'
        'src.rename(b/"previous-source") if src.exists() else None;'
        '(b/"source").rename(src);live.rename(b/"previous-plugin");(b/"next").rename(live)')
+    if before_omni!=next_omni:
+        omni_changed=True
+        api.call(OMNI_CONFIG,{'config':next_omni},method='PUT',timeout=120)
     api.call('/api/v1/plugins/reload',{'plugin_id':NAME},timeout=120)
     current=plugin()
     report['checks']['version']=current['activated'] and current['version']==VERSION
     report['checks']['source_hashes_match']=live_hashes()==expected
     report['checks']['configuration_unchanged']=api.call(CONFIG)['data']['config']==before_config
+    report['checks']['omnidraw_only_batch_limit_changed']=api.call(OMNI_CONFIG)['data']['config']==next_omni
+    batch_status=api.call('/api/plug/qq_persona_models/image_batch/status')['data']
+    report['checks']['batch_ready']=batch_status=={'ready':True,'max_images_per_request':4,'max_image_attempts':5,'concurrency':2,'timeouts_ready':True,'image_tool_timeout_seconds':600}
     state=backend()
     report['checks']['candidate_ready']=any(c['value']=='contextaware' and c['available'] for c in state['choices'])
     report['checks']['page_registered']=any('上下文后端' in str(p) for p in current.get('pages',[]))
     report['checks']['page_namespace_api']=api.call('/api/plug/'+NAME+'/context_backend/status')['data']['backend']==state['backend']
     assert all(report['checks'].values()),'Runtime initialization verification failed'
-    for mode in ('attachments_only','image_reference_only','image_notice_only','recent_upload_only','image_followup_only','model_logging_only','group_permissions_only','image_task_only'):
+    for mode in ('attachments_only','image_reference_only','image_notice_only','recent_upload_only','image_followup_only','model_logging_only','group_permissions_only','image_task_only','image_batch_only'):
         result=api.call('/api/plug/qq_persona_models/verify_memory_meme',{mode:True},timeout=120)['data']
         assert result.get('model_calls',0)==0 and result.get('qq_messages_sent',0)==0,'Unexpected diagnostic side effects'
         report['checks'][mode]=result['passed'];report[mode+'_count']=len(result.get('checks',{}))
@@ -148,8 +165,10 @@ except BaseException as exc:
            '(b/"previous-source").rename(src) if (b/"previous-source").exists() else None;'
            'shutil.copy2(b/"previous-mode.json",state) if (b/"previous-mode.json").exists() else state.unlink(missing_ok=True)')
         api.call('/api/v1/plugins/reload',{'plugin_id':NAME},timeout=120)
+        if omni_changed:api.call(OMNI_CONFIG,{'config':before_omni},method='PUT',timeout=120)
         report['rolled_back']=live_hashes()==original and plugin()['version']==old['version']
         report['configuration_unchanged_after_rollback']=api.call(CONFIG)['data']['config']==before_config
+        report['omnidraw_restored_after_rollback']=api.call(OMNI_CONFIG)['data']['config']==before_omni
     write_report('context-runtime-deployment.json',report)
     raise
 write_report('context-runtime-deployment.json',report)

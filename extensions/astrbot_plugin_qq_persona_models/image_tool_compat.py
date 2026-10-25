@@ -57,7 +57,7 @@ class ImageExecutionGuard:
             if tool.handler is wrapper:tool.handler=original
         self.patches=[]
 
-def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False,indexed_references=False,task_contract=False):
+def prepare_chat_image_tools(request,model_notice=False,contextual_reference=False,indexed_references=False,task_contract=False,batch_images=False):
     source=getattr(request,'func_tool',None)
     if source is None:
         return
@@ -70,6 +70,9 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
         cloned=guarded_image_tool_copy(tool)
         cloned.parameters=deepcopy(tool.parameters)
         properties=cloned.parameters.get('properties',{})
+        if batch_images:
+            properties['count']={'type':'integer','minimum':1,'maximum':4,'description':'独立图片张数，最多4；不是一张拼图中的格数。'}
+            properties['image_prompts']={'type':'array','maxItems':4,'items':{'type':'string','maxLength':3000},'description':'可选逐张画面描述，非空时必须与count一一对应；共享约束保留在prompt/action，同主题随机变体填[]。整批共享同一参考集合。'}
         for key in ('return_result','refs'):
             properties.pop(key,None)
         if 'required' in cloned.parameters:

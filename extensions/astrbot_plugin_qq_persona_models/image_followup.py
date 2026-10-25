@@ -34,7 +34,7 @@ def public_activity(turn,now):
 
 def result_state(result):
     text='\n'.join(str(getattr(c,'text','')) for c in getattr(result,'content',[]) or [])
-    match=re.search(r'系统提示：已成功下发\s+(\d+)\s+张图',text)
+    match=re.search(r'系统提示：已成功(?:生成并)?下发(?:了)?\s*(\d+)\s*张图',text)
     if match and int(match[1])>0:return 'sent'
     if getattr(result,'isError',False) or '系统提示：画图失败' in text:return 'failed'
     return 'result_unconfirmed'

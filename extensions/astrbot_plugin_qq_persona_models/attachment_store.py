@@ -143,6 +143,8 @@ class AttachmentStore:
         budget=640;result={}
         for row in sorted(rows,key=lambda r:r['seq'],reverse=True):
             source=json.loads(row['source']);text=row['task_text'] if source.get('generated') and row['task_text'] else row['source_text']
+            if source.get('batch_index'):
+                text='第'+str(source['batch_index'])+'/'+str(source.get('batch_count',1))+'张：'+str(source.get('image_prompt_excerpt') or '')+'；原请求：'+str(text or '')
             excerpt=' '.join((text or '').split())[:min(96,budget)]
             if excerpt:result[row['id']]={'source_text':excerpt,'request_order':source.get('request_seq',row['seq'])};budget-=len(excerpt)
             if budget<=0:break

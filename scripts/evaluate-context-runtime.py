@@ -26,7 +26,7 @@ def main():
         docker('exec','qq-ai-bot-astrbot-1','python','-c','from pathlib import Path;p=Path('+repr('/AstrBot/data/'+subpath)+');assert p.parent==Path("/AstrBot/data/temp");p.mkdir()')
         cmd+=['--mount','type=volume,source='+volume+',destination=/AstrBot/data,volume-subpath='+subpath]
     else:cmd+=['--tmpfs','/AstrBot/data:rw,size=256m']
-    for src,dst in [('extensions','/workspace/extensions'),('integrations','/workspace/integrations'),('downloads/contextaware-f026c56','/candidate'),('scripts/verify-context-runtime-native.py','/workspace/verify.py')]:
+    for src,dst in [('extensions','/workspace/extensions'),('integrations','/workspace/integrations'),('downloads/contextaware-f026c56','/candidate'),('downloads/omnidraw-native-source','/omni-source'),('scripts','/workspace/scripts'),('scripts/verify-context-runtime-native.py','/workspace/verify.py')]:
         cmd+=['--mount','type=bind,src=/mnt/e/AI/ai/qq-ai-bot/'+src+',dst='+dst+',readonly']
     cmd+=['--entrypoint','python',info['Image'],'/workspace/verify.py']
     try:result=docker(*cmd)

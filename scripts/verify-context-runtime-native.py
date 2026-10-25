@@ -286,6 +286,15 @@ async def run():
                         check('native_validation_budget_removes_tools',len(seen_schemas)==3 and 'generate_image' not in seen_schemas[-1])
                     await release(e)
             finally:adapter.restore()
+            sys.path.insert(0,'/workspace/scripts')
+            from importlib import util
+            batch_spec=util.spec_from_file_location('batch_native','/workspace/scripts/verify-image-batch-native.py')
+            batch_fixture=util.module_from_spec(batch_spec);batch_spec.loader.exec_module(batch_fixture)
+            batch_result=await batch_fixture.verify_batch(probe,runtime,event,request,release,root)
+            for name,value in batch_result['checks'].items():check('batch_'+name,value)
+            from runtime_fixture.image_batch_checks import verify_image_batches
+            batch_pure=await verify_image_batches()
+            for name,value in batch_pure['checks'].items():check('batch_budget_'+name,value)
             probes={}
             for mode in ('builtin','contextaware'):
                 await runtime.switch(mode)
@@ -313,7 +322,7 @@ async def run():
             delta=measurements['contextaware']['p95_ms']-measurements['builtin']['p95_ms']
             check('candidate_added_local_p95_under_200ms',delta<200)
             check('no_extra_caption_summary_or_model_calls',not runtime.candidate.plugin._image_caption_enabled and runtime.candidate.plugin._topic is None and runtime.metrics['model_calls_added']==0)
-            print('RUNTIME_REPORT='+json.dumps({'passed':all(checks.values()),'checks':checks,'measurements':measurements,'retained_image_bytes':retained,'delta_p95_ms':round(delta,3),'model_calls':0,'image_generations':0,'qq_messages_sent':0,'model_probes':probes},ensure_ascii=False),flush=True)
+            print('RUNTIME_REPORT='+json.dumps({'passed':all(checks.values()),'checks':checks,'measurements':measurements,'batch_native':{k:v for k,v in batch_result.items() if k!='checks'},'retained_image_bytes':retained,'delta_p95_ms':round(delta,3),'model_calls':0,'image_generations':0,'qq_messages_sent':0,'model_probes':probes},ensure_ascii=False),flush=True)
         finally:
             await runtime.close()
 

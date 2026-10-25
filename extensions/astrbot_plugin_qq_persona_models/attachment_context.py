@@ -419,6 +419,8 @@ class AttachmentContext:
                     for part in parts:
                         if 'source' in part:
                             part['source'].update(request_seq=snapshot['seq'],requested_by=str(event.get_sender_id()),conversation_id=str(getattr(getattr(event.get_extra('provider_request'),'conversation',None),'cid','') or ''))
+                            batch=event.get_extra('qq_image_batch_delivery')
+                            if batch:part['source'].update(batch)
                     if not any(p['type']=='image' for p in parts):return receipt
                     mid=str(receipt.get('message_id')) if isinstance(receipt,dict) and receipt.get('message_id') else 'sent:'+str(getattr(event.message_obj,'message_id',''))+':'+str(ordinal)
                     record=await asyncio.to_thread(service.store.record,snapshot['scope'],event.unified_msg_origin,mid,str(event.get_self_id()),'AI','[已成功发送生成图片]',parts,'generated',event.get_extra('qq_attachment_parent_ids') or [],snapshot['epoch'])
