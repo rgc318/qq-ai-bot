@@ -113,7 +113,9 @@ async def run():
             fallback=await runtime.view_images(q,[evicted])
             check('inflight_view_survives_cache_eviction',sum(c.type=='image' for c in fallback.content)==1 and evicted in ''.join(getattr(c,'text','') for c in fallback.content))
             try:await runtime.select_references(q,{'reference_ids':['ca_not_authorized'],'prompt':'fixture'});denied=False
-            except ValueError:denied=True
+            except ValueError as exc:
+                denied=True
+                check('stale_id_feedback_includes_current_catalog_without_reupload',getattr(exc,'code',None)=='stale_reference_ids' and '不要求用户重发' in str(exc) and catalog[1]['id'] in str(exc))
             check('unseen_or_future_image_id_rejected',denied)
             args={'reference_ids':[r['id'] for r in catalog],'prompt':'synthetic edit','reference_notes':[{'image_id':r['id'],'purpose':'source fixture'} for r in catalog]}
             await runtime.select_references(q,args)
@@ -147,6 +149,11 @@ async def run():
             await runtime.switch('contextaware')
             restored=event('切换后继续');rr=request(restored);await runtime.prepare(restored,rr)
             check('switching_retains_archive_and_lineage',len(runtime.candidate.catalog(restored))==3)
+            restored_ids={r['message_id']:r['id'] for r in runtime.candidate.catalog(restored)}
+            check('historical_image_ids_survive_backend_reload',all(restored_ids[r['message_id']]==r['id'] for r in catalog))
+            same_args={'reference_ids':[r['id'] for r in catalog],'prompt':'恢复后仍用原来两图'}
+            await runtime.select_references(restored,same_args)
+            check('historical_refs_after_reload_use_exact_same_pixels',[Path(c.path).read_bytes() for c in restored.get_messages() if isinstance(c,Image)]==[front.read_bytes(),side.read_bytes()])
             check('switching_restores_actual_sent_text_context','合成回复：已结合两张参考图完成' in json.dumps(await rr.assemble_context(),ensure_ascii=False))
             await release(restored)
             reused=request(q);await runtime.prepare(q,reused)

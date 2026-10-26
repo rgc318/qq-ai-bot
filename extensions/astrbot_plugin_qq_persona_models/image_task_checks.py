@@ -94,4 +94,10 @@ async def verify_image_tasks():
     normalized,stats=normalize_image_history([valid])
     checks['valid_modern_image_history_unchanged']=normalized==[valid] and not stats['legacy_image_calls']
     checks['ordinary_history_no_change']=normalize_image_history([{'role':'user','content':'你好'}])[0]==[{'role':'user','content':'你好'}]
+    normalized,stats=normalize_image_history([valid],{'A','B'})
+    checks['current_catalog_reference_history_preserved']=normalized==[valid] and not stats['legacy_image_calls']
+    normalized,stats=normalize_image_history([valid],{'different_current_id'})
+    checks['stale_reference_history_becomes_facts_not_executable_example']=stats['legacy_image_calls']==1 and 'tool_calls' not in normalized[0] and '角色原设定' in str(normalized[0])
+    independent={'role':'assistant','tool_calls':[{'id':'new','type':'function','function':{'name':'generate_image','arguments':json.dumps(new)}}]}
+    checks['independent_history_not_invalidated_by_empty_catalog']=normalize_image_history([independent],set())[0]==[independent]
     return {'passed':all(checks.values()),'checks':checks,'model_calls':0,'image_generations':0,'qq_messages_sent':0}

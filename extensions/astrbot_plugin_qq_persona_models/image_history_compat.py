@@ -6,7 +6,7 @@ IMAGE_TOOLS={'generate_image','generate_selfie'}
 REQUIRED={'image_task','reference_ids','reference_notes'}
 
 
-def normalize_image_history(contexts):
+def normalize_image_history(contexts,valid_reference_ids=None):
     source=contexts if isinstance(contexts,list) else []
     obsolete={};replacements={}
     for index,row in enumerate(source):
@@ -17,13 +17,19 @@ def normalize_image_history(contexts):
             if fn.get('name') not in IMAGE_TOOLS:keep.append(call);continue
             try:args=json.loads(fn.get('arguments') or '{}')
             except (ValueError,TypeError):args={}
-            if isinstance(args,dict) and REQUIRED.issubset(args) and not any(k.startswith('_qq_') for k in args):keep.append(call);continue
+            current_refs=isinstance(args,dict) and isinstance(args.get('reference_ids'),list) and (valid_reference_ids is None or all(isinstance(i,str) and i in valid_reference_ids for i in args['reference_ids']))
+            if isinstance(args,dict) and REQUIRED.issubset(args) and current_refs and not any(k.startswith('_qq_') for k in args):keep.append(call);continue
             obsolete[call.get('id')]=index
             text=(args.get('prompt') or args.get('action')) if isinstance(args,dict) else ''
             note='[历史图片任务，仅作资料；旧接口参数不适用于本轮，请按当前工具定义调用]\n'+str(text or '原参数记录不完整')
             if isinstance(args,dict):
                 for key,label in [('count','当时请求张数'),('aspect_ratio','当时比例'),('pending_message','当时开工对白')]:
                     if key in args:note+='\n'+label+'：'+str(args[key])
+                task=args.get('image_task') or {}
+                if isinstance(task,dict) and task.get('reason'):note+='\n当时任务判断：'+str(task['reason'])
+                purposes=args.get('reference_notes')
+                for item in purposes if isinstance(purposes,list) else []:
+                    if isinstance(item,dict) and item.get('purpose'):note+='\n当时参考图用途：'+str(item['purpose'])
             notes.append(note)
         if notes:
             changed=deepcopy(row);content=changed.get('content')

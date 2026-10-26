@@ -35,7 +35,7 @@ from .image_batch import ImageBatchAdapter,validate_batch
 from .image_batch_timeout import ImageTimeoutAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.2")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.3")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -806,7 +806,8 @@ class PersonaModelBindings(Star):
         else:history=original or [];stats={'before_messages':len(history),'after_messages':len(history),'removed_history_images':0,'changed':False}
         if image_contract:
             from .image_history_compat import normalize_image_history
-            history,legacy=normalize_image_history(history);stats.update(legacy)
+            ids=(event.get_extra('qq_ca_source_map') or {}) if event.get_extra('qq_context_backend')=='contextaware' else (event.get_extra('qq_attachment_snapshot') or {}).get('ids',[])
+            history,legacy=normalize_image_history(history,set(ids));stats.update(legacy)
             stats['changed']=stats['changed'] or bool(legacy['legacy_image_calls'])
             stats['after_messages']=len(history)
         if stats['changed']:

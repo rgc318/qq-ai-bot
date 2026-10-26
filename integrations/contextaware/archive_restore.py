@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 import asyncio
 import json
+import hashlib
 from types import SimpleNamespace
 
 
@@ -87,10 +88,19 @@ class ArchiveRestorer:
                 native_id = native_ids[0] if native_ids else None
             if native_id:
                 resource = index.get(view.unified_msg_origin, native_id)
+                # Upstream IDs are random per in-memory index. The archived
+                # identity already includes scope and epoch; use a stable local
+                # alias so reload/eviction cannot invalidate retained sources.
+                stable_id='ca_'+hashlib.sha256(('qq-archive-v1|'+archive_id).encode()).hexdigest()[:24]
+                if stable_id!=native_id:
+                    if stable_id in index.resources:raise ValueError('归档图片标识冲突，拒绝替换来源')
+                    index.resources[stable_id]=index.resources.pop(native_id)
+                    index.sessions[view.unified_msg_origin]=[stable_id if i==native_id else i for i in index.sessions[view.unified_msg_origin]]
+                    native_id=stable_id
                 resource.source = ''
                 resource.data = data
                 # Preserve the real original source, not a synthetic platform ID.
-                resource.entry = replace(resource.entry, message_id=row['message_id'])
+                resource.entry = replace(resource.entry, image_id=native_id, message_id=row['message_id'])
                 ids[archive_id] = native_id
                 imported += 1
                 plugin._recall_sequence = max(plugin._recall_sequence, row['seq'])

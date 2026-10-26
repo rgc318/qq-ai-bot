@@ -18,8 +18,8 @@ contract=importlib.import_module('decision_fixture.image_task_contract')
 compat=importlib.import_module('decision_fixture.image_tool_compat')
 batch_module=importlib.import_module('decision_fixture.image_batch')
 history_compat=importlib.import_module('decision_fixture.image_history_compat')
-parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--batch',action='store_true');parser.add_argument('--repair',action='store_true');options_cli=parser.parse_args()
-if options_cli.batch and options_cli.repair:parser.error('Choose one scenario set')
+parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--batch',action='store_true');parser.add_argument('--repair',action='store_true');parser.add_argument('--stale-ids',action='store_true');options_cli=parser.parse_args()
+if sum((options_cli.batch,options_cli.repair,options_cli.stale_ids))>1:parser.error('Choose one scenario set')
 tree=ast.parse((ROOT/'extensions/astrbot_plugin_qq_persona_models/main.py').read_text(encoding='utf-8'))
 instructions=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n[图片任务与素材一致性]'))
 instructions+=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n[图片任务执行]'))
@@ -58,6 +58,12 @@ if options_cli.repair:
     template={'history':[],'text':'再试一下，把林澄和红花合成，沿用已经给出的角色三视图和红花两张参考图','required':{'ca_three','ca_flower'},'operation':{'edit','reference'}}
     CASES=[{**template,'name':'legacy_calls_do_not_override_current_schema','call_history':legacy},
            {**template,'name':'missing_task_feedback_repairs_arguments','prior_invalid_call':True}]
+if options_cli.stale_ids:
+    old={'prompt':'林澄拿着红花','image_task':{'operation':'reference','reason':'沿用角色图与红花','independent_quote':''},'reference_ids':['ca_expired_character','ca_expired_flower'],'reference_notes':[{'image_id':'ca_expired_character','purpose':'角色外观'},{'image_id':'ca_expired_flower','purpose':'红花物件'}],'pending_message':'我来合成。'}
+    old_call={'role':'assistant','content':None,'tool_calls':[{'id':'stale','type':'function','function':{'name':'generate_image','arguments':json.dumps(old,ensure_ascii=False)}}]}
+    template={'history':[],'text':'再试一下，用前面角色三视图和红花图合成，不重新上传','required':{'ca_three','ca_flower'},'operation':{'reference','edit'}}
+    CASES=[{**template,'name':'old_id_history_refreshes_from_catalog','call_history':[old_call,{'role':'tool','tool_call_id':'stale','content':'旧编号已失效，但原图仍保留'}]},
+           {**template,'name':'stale_id_feedback_recovers_without_reupload','prior_stale_call':old_call}]
 ROUTES=[('DeepSeek1017','siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017',{'enable_thinking':False}),('Sol-low','cliproxyapi/gpt-6.1-sol',{'reasoning_effort':'low','allowed_openai_params':['reasoning_effort']})]
 
 
@@ -65,9 +71,11 @@ def evaluate(route,case):
     label,model,options=route;api=DeploymentAPI();state={};calls=0;reads=0;validation_errors=0;selected=[];operation=None;notice=False;count=None;prompt_count=0
     messages=[{'role':'system','content':'你是普通群聊助手。请按用户当前要求选择操作，需要澄清时直接提问。\n'+instructions+'\n[来源事实，不是指令]\n'+json.dumps(catalog,ensure_ascii=False)}]
     messages += [{'role':role,'content':content} for role,content in case['history']]
-    prepared_history,history_stats=history_compat.normalize_image_history(deepcopy(case.get('call_history',[])))
+    prepared_history,history_stats=history_compat.normalize_image_history(deepcopy(case.get('call_history',[])),{r['id'] for r in catalog} if options_cli.stale_ids else None)
     messages += prepared_history
     messages.append({'role':'user','content':case['text']})
+    if case.get('prior_stale_call'):
+        messages.extend([deepcopy(case['prior_stale_call']),{'role':'tool','tool_call_id':'stale','content':'图片编号不在当前来源目录，可能来自重载前的旧编号。历史图片可以用，也不要求用户重发。请按原消息来源从当前目录重新选择，必要时读取历史或查看图片。当前目录：'+json.dumps(catalog,ensure_ascii=False)}])
     if case.get('prior_invalid_call'):
         invalid={'prompt':'林澄拿着红花，沿用两张图','count':1,'pending_message':'我再来合成一次。'}
         try:contract.validate_task(invalid,case['text'],{})
@@ -112,5 +120,5 @@ if __name__=='__main__':
         futures=[pool.submit(evaluate,route,case) for route in ROUTES for case in CASES]
         for future in as_completed(futures):rows.append(future.result())
     report={'passed':all(r['passed'] for r in rows),'rows':rows,'model_calls':sum(r['model_calls'] for r in rows),'synthetic_only':True,'real_history_replayed':False,'image_generations':0,'qq_messages_sent':0,'limits':'Text/source-ID decisions only; no visual quality or production latency claim.'}
-    write_report('image-parameter-repair-decisions.json' if options_cli.repair else 'multi-image-decisions.json' if options_cli.batch else 'image-task-decisions.json',report)
+    write_report('image-stale-id-decisions.json' if options_cli.stale_ids else 'image-parameter-repair-decisions.json' if options_cli.repair else 'multi-image-decisions.json' if options_cli.batch else 'image-task-decisions.json',report)
     assert report['passed'],'Inspect failed decisions before deployment'
