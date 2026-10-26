@@ -2,7 +2,7 @@
 
 方案：**SnowLuma + AstrBot 官方版 + 自有模型 API**。
 
-当前正在通过 **Ubuntu WSL2 的 Docker Compose** 正式部署。实际状态见 [STATUS.md](STATUS.md)；当前操作入口是 [compose.yaml](compose.yaml) 和 [Compose 部署说明](docs/docker-compose.md)，原生 Windows 安装说明只保留为备用。
+当前已通过 **Ubuntu WSL2 的 Docker Compose** 部署，本地扩展为 **1.11.4**。实际状态与验收范围见 [STATUS.md](STATUS.md)；操作入口是 [compose.yaml](compose.yaml) 和 [Compose 部署说明](docs/docker-compose.md)，原生 Windows 安装说明保留为备用。
 
 ```text
 QQ ↔ SnowLuma ↔ OneBot v11 反向 WebSocket ↔ AstrBot ↔ 模型 API
@@ -19,6 +19,10 @@ QQ ↔ SnowLuma ↔ OneBot v11 反向 WebSocket ↔ AstrBot ↔ 模型 API
 长期记忆与表情包已经启用，配置入口、人格隔离和用法见 [长期记忆和表情包](docs/memory-and-memes.md)。
 
 较旧的对话可跨新会话按需检索原文，日常聊天继续使用近期上下文，用法和设置见 [按需找回旧对话](docs/history-recall.md)。
+
+测试群已接入可切换的 ContextAware 上下文后端，共用持久化消息与附件档案；历史图片可按来源重新读取并用于改图。后端切换、权限和已实现边界见 [上下文运行层](docs/context-runtime-2026-10-25.md)。
+
+一句话可生成最多 4 张独立图片，支持逐张不同描述和共用参考图；用法与部分失败处理见 [多图方案](docs/multi-image-plan-2026-10-26.md)。最新真实双参考图任务已完成原图恢复、改图、发送及文字收尾，耗时与仍需改进的收尾描述见 [真实流程与时延复核](docs/runtime-latency-review-2026-10-26.md)。
 
 服务启动后，在 Windows 浏览器访问：
 
