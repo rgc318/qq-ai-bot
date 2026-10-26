@@ -81,12 +81,13 @@ async def verify_batch(probe,runtime,event,request,release,root,package_name='ru
     probe.context.get_registered_star=lambda name:SimpleNamespace(star_cls=omni) if name=='astrbot_plugin_omnidraw' else SimpleNamespace(star_cls=sir) if name=='astrbot_plugin_self_initiated_reply' else registered_get(name)
     timeout_adapter.install(probe.context);runtime.install_outgoing()
     check=lambda name,value:checks.__setitem__(name,bool(value))
-    async def call(e,count,prompts,refs=(),selfie=False):
+    async def call(e,count,prompts,refs=(),selfie=False,alias=False):
         await runtime.prepare(e,request(e));catalog=runtime.candidate.catalog(e)
         selected=[next(r['id'] for r in catalog if r['message_id']==mid) for mid in refs]
         e.set_extra('qq_diagnostic',False);e.set_extra('qq_image_task_contract_enabled',True);e.set_extra('qq_image_batch_enabled',True)
         req=request(e);probe.image_failure_policy.track(e,req)
         args={'action' if selfie else 'prompt':'共享风格与约束','count':count,'image_prompts':prompts,'pending_message':'我来把这几张分别画出来。','image_task':{'operation':'edit' if selected else 'independent','reason':'合成任务','independent_quote':'' if selected else e.message_str},'reference_ids':selected,'reference_notes':[{'image_id':i,'purpose':'保持原始设定'} for i in selected]}
+        if alias:args['prompt' if selfie else 'action']=args.pop('action' if selfie else 'prompt')
         tool=SimpleNamespace(name='generate_selfie' if selfie else 'generate_image')
         await probe.normalize_image_arguments(e,tool,args);await probe.announce_image_generation(e,tool,args)
         from importlib import import_module
@@ -175,6 +176,10 @@ async def verify_batch(probe,runtime,event,request,release,root,package_name='ru
         e=event('取消后再画一张');before=len(received);result,state,report=await call(e,1,[])
         check('cancelled_batch_releases_concurrency_slots',len(received)-before==1 and state['delivered_images']==1)
         await release(e)
+        for selfie in (False,True):
+            e=event('独立创作别名兼容测试');before=len(received);result,state,report=await call(e,1,[],selfie=selfie,alias=True)
+            check('native_description_alias_executes_once_'+str(selfie),len(received)-before==1 and state['delivered_images']==1)
+            await release(e)
     finally:
         # Restore the archive wrapper first, then its underlying batch adapter.
         kept=[]

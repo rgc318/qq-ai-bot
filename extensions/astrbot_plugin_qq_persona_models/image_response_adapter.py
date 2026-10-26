@@ -1,6 +1,7 @@
 """Defer image-only non-stream text to the existing post-validation notice hook."""
 from functools import wraps
 from copy import copy,deepcopy
+from .image_tool_compat import normalize_chat_image_arguments
 
 IMAGE_TOOLS={'generate_image','generate_selfie'}
 
@@ -67,7 +68,7 @@ class ImageResponseAdapter:
             event=getattr(getattr(getattr(runner,'run_context',None),'context',None),'event',None)
             if event and event.get_extra('qq_image_task_contract_enabled') and any(n in IMAGE_TOOLS for n in response.tools_call_name or []):
                 for name,args in zip(response.tools_call_name,response.tools_call_args):
-                    if name in IMAGE_TOOLS and isinstance(args,dict):args.pop('_qq_image_guard_error',None)
+                    if name in IMAGE_TOOLS and isinstance(args,dict):normalize_chat_image_arguments(name,args)
                 # Native permission proxies alias valid_params to response args.
                 # Hooks consume helpers and add private execution errors. Keep
                 # those mutations off the response later serialized as history.

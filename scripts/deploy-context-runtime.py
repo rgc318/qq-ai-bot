@@ -22,10 +22,10 @@ CONTAINER='qq-ai-bot-astrbot-1'
 LIVE='/AstrBot/data/plugins/'+NAME
 DATA='/AstrBot/data/plugin_data/'+NAME
 SOURCE=DATA+'/contextaware-source'
-VERSION='1.11.3'
+VERSION='1.11.4'
 api=DeploymentAPI()
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--baseline',choices=('1.8.1','1.9.0','1.10.0','1.11.0','1.11.1','1.11.2','1.11.3'),default='1.11.2',help='Explicitly reviewed live version')
+parser.add_argument('--baseline',choices=('1.8.1','1.9.0','1.10.0','1.11.0','1.11.1','1.11.2','1.11.3','1.11.4'),default='1.11.3',help='Explicitly reviewed live version')
 args=parser.parse_args()
 CONFIG='/api/v1/plugins/'+NAME+'/config'
 before_config=api.call(CONFIG)['data']['config']
@@ -56,7 +56,7 @@ def idle():
         proactive=proactive.get('data',proactive)
         queued=any(proactive.get('tasks',{}).get(k,0) for k in ('delay','running_check')) or bool(proactive.get('gate',{}).get('running'))
         owned=False
-        if plugin()['version'] in ('1.9.0','1.10.0','1.11.0','1.11.1','1.11.2','1.11.3'):
+        if plugin()['version'] in ('1.9.0','1.10.0','1.11.0','1.11.1','1.11.2','1.11.3','1.11.4'):
             runtime=backend();owned=runtime['active_requests'] or runtime['pending_messages'] or runtime['switching']
         stable=0 if active or queued or owned else stable+1
         if stable>=3:return

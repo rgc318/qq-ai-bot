@@ -70,6 +70,8 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
         cloned=guarded_image_tool_copy(tool)
         cloned.parameters=deepcopy(tool.parameters)
         properties=cloned.parameters.get('properties',{})
+        canonical='prompt' if tool.name=='generate_image' else 'action'
+        if canonical in properties and canonical not in cloned.parameters.setdefault('required',[]):cloned.parameters['required'].append(canonical)
         if batch_images:
             properties['count']={'type':'integer','minimum':1,'maximum':4,'description':'独立图片张数，最多4；不是一张拼图中的格数。'}
             properties['image_prompts']={'type':'array','maxItems':4,'items':{'type':'string','maxLength':3000},'description':'可选逐张画面描述，非空时必须与count一一对应；共享约束保留在prompt/action，同主题随机变体填[]。整批共享同一参考集合。'}
@@ -101,6 +103,7 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
             cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 生成后自动发送图片。用reference_ids明确选择参考集合，独立新图填[]；先确认所选图的内容与来源，不填写文件路径。'
         if task_contract:
             cloned.description+=' 必填任务声明：image_task={operation:independent/edit/reference,reason:判断依据,independent_quote:独立新图时逐字引用本条用户原话，否则空串}；reference_ids=[真实图片ID]，reference_notes=[{image_id:同一ID,purpose:该图用途}]。独立新图后二者填[]；改图不可空参考。缺少这些参数是本地格式校验失败，不是图片模型离线；修正完整参数后才能执行。'
+        cloned.description+=' 本工具的画面描述填写在 '+canonical+' 参数。'
         if model_notice:
             cloned.description+=' 同一次工具调用中填写 pending_message，程序会在开始生图前先发送这句人格对白，无需另外调用发送消息工具。'
         result.tools.append(cloned)
@@ -113,3 +116,9 @@ def normalize_chat_image_arguments(tool_name,args):
     args.pop('refs',None)
     # This is server-owned execution state, never a model input parameter.
     args.pop(IMAGE_GUARD_ERROR,None)
+    canonical,alias=('prompt','action') if tool_name=='generate_image' else ('action','prompt')
+    other=args.pop(alias,None)
+    if other is not None:
+        current=args.get(canonical)
+        if not current:args[canonical]=other
+        elif other and other!=current:args[canonical]=str(current)+'\n补充画面说明：'+str(other)

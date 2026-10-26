@@ -100,4 +100,13 @@ async def verify_image_tasks():
     checks['stale_reference_history_becomes_facts_not_executable_example']=stats['legacy_image_calls']==1 and 'tool_calls' not in normalized[0] and '角色原设定' in str(normalized[0])
     independent={'role':'assistant','tool_calls':[{'id':'new','type':'function','function':{'name':'generate_image','arguments':json.dumps(new)}}]}
     checks['independent_history_not_invalidated_by_empty_catalog']=normalize_image_history([independent],set())[0]==[independent]
+    from .image_tool_compat import normalize_chat_image_arguments
+    alias={'action':'保留角色画红花','reference_ids':['A'],'image_task':{'operation':'edit'}}
+    normalize_chat_image_arguments('generate_image',alias)
+    checks['image_action_alias_maps_to_prompt_without_changing_references']=alias=={'prompt':'保留角色画红花','reference_ids':['A'],'image_task':{'operation':'edit'}}
+    alias={'prompt':'在花园自拍'};normalize_chat_image_arguments('generate_selfie',alias)
+    checks['selfie_prompt_alias_maps_to_action']=alias=={'action':'在花园自拍'}
+    alias={'prompt':'保留蓝发','action':'加入红花'};normalize_chat_image_arguments('generate_image',alias)
+    checks['both_description_fields_preserve_all_model_instructions']='蓝发' in alias['prompt'] and '红花' in alias['prompt'] and 'action' not in alias
+    checks['native_image_description_required_in_schema']='prompt' in wire['parameters']['required']
     return {'passed':all(checks.values()),'checks':checks,'model_calls':0,'image_generations':0,'qq_messages_sent':0}
