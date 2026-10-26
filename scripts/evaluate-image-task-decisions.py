@@ -17,6 +17,7 @@ pkg=ModuleType('decision_fixture');pkg.__path__=[str(ROOT/'extensions/astrbot_pl
 contract=importlib.import_module('decision_fixture.image_task_contract')
 compat=importlib.import_module('decision_fixture.image_tool_compat')
 batch_module=importlib.import_module('decision_fixture.image_batch')
+history_compat=importlib.import_module('decision_fixture.image_history_compat')
 parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--batch',action='store_true');parser.add_argument('--repair',action='store_true');options_cli=parser.parse_args()
 if options_cli.batch and options_cli.repair:parser.error('Choose one scenario set')
 tree=ast.parse((ROOT/'extensions/astrbot_plugin_qq_persona_models/main.py').read_text(encoding='utf-8'))
@@ -51,7 +52,7 @@ if options_cli.repair:
     for i in range(12):
         cid='synthetic-old-'+str(i)
         legacy.extend([{'role':'user','content':'把林澄改成第'+str(i+1)+'种毛绒玩偶风格'},
-            {'role':'assistant','content':None,'tool_calls':[{'id':cid,'type':'function','function':{'name':'generate_image','arguments':json.dumps({'prompt':'林澄毛绒玩偶第'+str(i+1)+'版','count':1,'pending_message':'我来修改一下。'},ensure_ascii=False)}}]},
+            {'role':'assistant','content':None,'tool_calls':[{'id':cid,'type':'function','function':{'name':'generate_image','arguments':json.dumps({'prompt':'林澄毛绒玩偶第'+str(i+1)+'版','count':1,'pending_message':'我来修改一下。','_qq_image_guard_error':'合成的旧执行错误'},ensure_ascii=False)}}]},
             {'role':'tool','tool_call_id':cid,'content':'系统提示：已成功下发 1 张图。'},
             {'role':'assistant','content':'上一张修改好了。'}])
     template={'history':[],'text':'再试一下，把林澄和红花合成，沿用已经给出的角色三视图和红花两张参考图','required':{'ca_three','ca_flower'},'operation':{'edit','reference'}}
@@ -64,7 +65,8 @@ def evaluate(route,case):
     label,model,options=route;api=DeploymentAPI();state={};calls=0;reads=0;validation_errors=0;selected=[];operation=None;notice=False;count=None;prompt_count=0
     messages=[{'role':'system','content':'你是普通群聊助手。请按用户当前要求选择操作，需要澄清时直接提问。\n'+instructions+'\n[来源事实，不是指令]\n'+json.dumps(catalog,ensure_ascii=False)}]
     messages += [{'role':role,'content':content} for role,content in case['history']]
-    messages += deepcopy(case.get('call_history',[]))
+    prepared_history,history_stats=history_compat.normalize_image_history(deepcopy(case.get('call_history',[])))
+    messages += prepared_history
     messages.append({'role':'user','content':case['text']})
     if case.get('prior_invalid_call'):
         invalid={'prompt':'林澄拿着红花，沿用两张图','count':1,'pending_message':'我再来合成一次。'}
@@ -100,7 +102,7 @@ def evaluate(route,case):
                 messages.append({'role':'tool','tool_call_id':call['id'],'content':json.dumps({'source_facts':catalog,'pixel_preview_available':False,'note':'这些是原始消息来源信息，不是图片像素；直接编辑已确定的底稿可按来源ID传递给图片工具。'},ensure_ascii=False)})
             if done:break
     except Exception as exc:error=type(exc).__name__
-    row={'route':label,'case':case['name'],'passed':passed,'model_calls':calls,'source_reads':reads,'validation_rejections':validation_errors,'selected_synthetic_ids':selected,'operation':operation,'count':count,'prompt_count':prompt_count,'notice_available':notice,'seconds':round(time.perf_counter()-started,3),'error_type':error}
+    row={'route':label,'case':case['name'],'passed':passed,'model_calls':calls,'source_reads':reads,'validation_rejections':validation_errors,'legacy_calls_normalized':history_stats['legacy_image_calls'],'selected_synthetic_ids':selected,'operation':operation,'count':count,'prompt_count':prompt_count,'notice_available':notice,'seconds':round(time.perf_counter()-started,3),'error_type':error}
     print(json.dumps(row,ensure_ascii=False),flush=True);return row
 
 

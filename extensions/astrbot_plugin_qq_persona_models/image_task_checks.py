@@ -78,4 +78,20 @@ async def verify_image_tasks():
     checks['blocked_mixed_response_is_not_replaced']=not stop_blocked_image_response(event,response) and response.tools_call_name==['search','generate_image']
     extras['qq_image_failure_state']['blocked']=False;response=retry()
     checks['valid_image_retry_is_not_replaced']=not stop_blocked_image_response(event,response) and response.tools_call_name==['generate_image']
+    from .image_history_compat import normalize_image_history
+    import json
+    old={'role':'assistant','content':'之前正在改图','tool_calls':[{'id':'old','type':'function','function':{'name':'generate_image','arguments':json.dumps({'prompt':'把角色保留蓝发，加入红花','count':1,'_qq_image_guard_error':'old private error'})}}, {'id':'search','type':'function','function':{'name':'search','arguments':'{}'}}]}
+    pixels={'type':'image_url','image_url':{'url':'data:image/png;base64,c3ludGhldGlj'}}
+    history=[old,{'role':'tool','tool_call_id':'old','content':[{'type':'text','text':'当时没有执行'},pixels]}, {'role':'tool','tool_call_id':'search','content':'其他工具结果'}, {'role':'user','content':'再试一下'}]
+    before=deepcopy(history);normalized,stats=normalize_image_history(history);dump=json.dumps(normalized,ensure_ascii=False)
+    checks['legacy_history_normalization_does_not_mutate_source']=history==before
+    checks['legacy_execution_private_keys_not_shown_to_model']='_qq_image_guard_error' not in dump and 'old private error' not in dump
+    checks['legacy_task_and_result_facts_retained']='蓝发，加入红花' in dump and '当时没有执行' in dump
+    checks['legacy_result_media_preserved']=pixels in normalized[0]['content']
+    checks['mixed_tool_ids_and_adjacency_preserved']=normalized[0]['tool_calls']==[old['tool_calls'][1]] and normalized[1]['tool_call_id']=='search'
+    checks['legacy_call_and_result_counts']=stats=={'legacy_image_calls':1,'legacy_image_results':1}
+    valid={'role':'assistant','tool_calls':[{'id':'valid','type':'function','function':{'name':'generate_image','arguments':json.dumps(edit)}}]}
+    normalized,stats=normalize_image_history([valid])
+    checks['valid_modern_image_history_unchanged']=normalized==[valid] and not stats['legacy_image_calls']
+    checks['ordinary_history_no_change']=normalize_image_history([{'role':'user','content':'你好'}])[0]==[{'role':'user','content':'你好'}]
     return {'passed':all(checks.values()),'checks':checks,'model_calls':0,'image_generations':0,'qq_messages_sent':0}

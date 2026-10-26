@@ -1,5 +1,6 @@
 """Defer image-only non-stream text to the existing post-validation notice hook."""
 from functools import wraps
+from copy import copy,deepcopy
 
 IMAGE_TOOLS={'generate_image','generate_selfie'}
 
@@ -43,7 +44,7 @@ def defer_notice(event,response):
 
 
 class ImageResponseAdapter:
-    def __init__(self):self.patch=None
+    def __init__(self):self.patch=None;self.args_patch=None
     def install(self):
         if self.patch:return
         from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
@@ -60,7 +61,29 @@ class ImageResponseAdapter:
             finally:await iterator.aclose()
         owner._iter_llm_responses_with_fallback=wrapped
         self.patch=(owner,original,wrapped)
+        execute_original=owner._handle_function_tools
+        @wraps(execute_original)
+        async def execute(runner,request,response):
+            event=getattr(getattr(getattr(runner,'run_context',None),'context',None),'event',None)
+            if event and event.get_extra('qq_image_task_contract_enabled') and any(n in IMAGE_TOOLS for n in response.tools_call_name or []):
+                for name,args in zip(response.tools_call_name,response.tools_call_args):
+                    if name in IMAGE_TOOLS and isinstance(args,dict):args.pop('_qq_image_guard_error',None)
+                # Native permission proxies alias valid_params to response args.
+                # Hooks consume helpers and add private execution errors. Keep
+                # those mutations off the response later serialized as history.
+                execution=copy(response)
+                execution.tools_call_args=[deepcopy(a) if n in IMAGE_TOOLS else a for n,a in zip(response.tools_call_name,response.tools_call_args)]
+            else:execution=response
+            iterator=execute_original(runner,request,execution)
+            try:
+                async for result in iterator:yield result
+            finally:await iterator.aclose()
+        owner._handle_function_tools=execute;self.args_patch=(owner,execute_original,execute)
     def restore(self):
+        if self.args_patch:
+            owner,original,wrapped=self.args_patch
+            if owner._handle_function_tools is wrapped:owner._handle_function_tools=original
+            self.args_patch=None
         if self.patch:
             owner,original,wrapped=self.patch
             if owner._iter_llm_responses_with_fallback is wrapped:owner._iter_llm_responses_with_fallback=original

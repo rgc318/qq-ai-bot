@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 import json
+import gzip
 from pathlib import Path
 import shutil
 import statistics
@@ -239,17 +240,28 @@ async def run():
             from runtime_fixture.image_task_checks import verify_image_tasks
             pure=await verify_image_tasks()
             for name,value in pure['checks'].items():check('task_'+name,value)
+            legacy=[{'role':'assistant','tool_calls':[{'id':'legacy','type':'function','function':{'name':'generate_image','arguments':json.dumps({'prompt':'保留红色角色与背景','_qq_image_guard_error':'internal only'})}}]}, {'role':'tool','tool_call_id':'legacy','content':'当时校验失败'}]
+            old_cache=getattr(probe,'cache_path',None);probe.cache_path=root/'reply_context.json'
+            fixture_request=SimpleNamespace(contexts=legacy,system_prompt='')
+            probe.prepare_performance_context(event('继续改图'),fixture_request,image_contract=True)
+            backups=[json.loads(gzip.decompress(p.read_bytes())) for p in (root/'history_archive').glob('*.json.gz')]
+            check('legacy_raw_history_archived_before_request_normalization',any(r['history']==legacy for r in backups))
+            check('legacy_request_normalization_keeps_task_facts','红色角色与背景' in json.dumps(fixture_request.contexts,ensure_ascii=False) and '_qq_image_guard_error' not in json.dumps(fixture_request.contexts))
+            if old_cache is None:del probe.cache_path
+            else:probe.cache_path=old_cache
             from runtime_fixture.image_response_adapter import ImageResponseAdapter
             adapter=ImageResponseAdapter();adapter.install()
             probe.config['image_pending_notice']={'enabled':True,'model_generated':True}
             try:
                 for repair in (True,False):
                     e=event('把之前的图改成毛绒玩偶');e.set_extra('qq_diagnostic',False)
-                    calls=[];seen_schemas=[];seen_contracts=[]
+                    calls=[];seen_schemas=[];seen_contracts=[];seen_histories=[]
                     async def guarded_stub(ev,prompt):
                         calls.append({'prompt':prompt,'pixels':[Path(c.path).read_bytes() for c in ev.get_messages() if isinstance(c,Image)]})
                         return '合成图片执行已捕获，未调用图片模型或发图。'
                     tool=FunctionTool(name='generate_image',description='synthetic',parameters={'type':'object','properties':{'prompt':{'type':'string'}},'required':['prompt']},handler=guarded_stub)
+                    from astrbot.core.provider.func_tool_manager import _PermissionGuardedTool
+                    tool=_PermissionGuardedTool(tool,SimpleNamespace(_check_tool_permission=no_op))
                     req=ProviderRequest(prompt=e.message_str,func_tool=ToolSet(tools=[tool]))
                     await runtime.prepare(e,req)
                     chosen=next(r['id'] for r in runtime.candidate.catalog(e) if r['message_id']==upload.message_obj.message_id)
@@ -262,10 +274,11 @@ async def run():
                         async def text_chat(self,**kw):
                             seen_schemas.append(kw['func_tool'].names() if kw.get('func_tool') else [])
                             seen_contracts.append(kw['func_tool'].openai_schema() if kw.get('func_tool') else [])
+                            seen_histories.append(json.loads(json.dumps(kw.get('contexts') or [])))
                             n=len(seen_schemas)
                             if n>2 and repair:return LLMResponse(role='assistant',completion_text='当前资料未确认，先澄清。')
                             ids=[chosen] if repair and n==2 else []
-                            return LLMResponse(role='assistant',result_chain=e.plain_result('我来保留原造型，把材质改成绒布。'),tools_call_name=['generate_image'],tools_call_args=[{'prompt':'fixture','image_task':{'operation':'edit','reason':'沿用既有角色图','independent_quote':''},'reference_ids':ids,'reference_notes':[{'image_id':i,'purpose':'角色底稿'} for i in ids]}],tools_call_ids=['contract-'+str(n)])
+                            return LLMResponse(role='assistant',result_chain=e.plain_result('我来保留原造型，把材质改成绒布。'),tools_call_name=['generate_image'],tools_call_args=[{'prompt':'fixture','image_task':{'operation':'edit','reason':'沿用既有角色图','independent_quote':''},'reference_ids':ids,'reference_notes':[{'image_id':i,'purpose':'角色底稿'} for i in ids],**({'_qq_image_guard_error':'replayed old server-only error'} if repair and n==2 else {})}],tools_call_ids=['contract-'+str(n)])
                     async def starts(ctx,t,args):
                         await probe.normalize_image_arguments(e,t,args)
                         await probe.announce_image_generation(e,t,args)
@@ -288,6 +301,9 @@ async def run():
                         check('native_blocked_retry_never_returns_tool_not_found','连续两次' in runner.get_final_llm_resp().completion_text and not runner.get_final_llm_resp().tools_call_name)
                     wire=next(t['function'] for t in seen_contracts[0] if t['function']['name']=='generate_image')
                     check('native_provider_has_required_image_task_fields',{'image_task','reference_ids','reference_notes'}.issubset(wire['parameters']['required']))
+                    recorded=[json.loads(c['function']['arguments']) for row in seen_histories[-1] for c in row.get('tool_calls') or [] if c['function']['name']=='generate_image']
+                    check('native_permission_proxy_keeps_model_task_args_'+str(repair),bool(recorded) and all('image_task' in a and 'reference_ids' in a and 'reference_notes' in a and 'pending_message' in a for a in recorded))
+                    check('native_private_guard_error_never_enters_history_'+str(repair),all('_qq_image_guard_error' not in a for a in recorded))
                     await release(e)
             finally:adapter.restore()
             sys.path.insert(0,'/workspace/scripts')

@@ -35,7 +35,7 @@ from .image_batch import ImageBatchAdapter,validate_batch
 from .image_batch_timeout import ImageTimeoutAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.1")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.2")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -693,7 +693,7 @@ class PersonaModelBindings(Star):
             if upload and activity:activity.emit('recent_upload_reference',**event_trace(event),purpose='image_reference_selection',outcome='attached' if event.get_extra('qq_recent_upload_attached') else 'unavailable_no_old_fallback',image_source='recent_upload',source_message=upload['source_message'],attached_reference_count=upload['reference_count'] if event.get_extra('qq_recent_upload_attached') else 0)
             await capture_turn(self,event,request)
             if not wants_existing_meme(event.get_message_str()):attach_followup(self,event,request)
-        self.prepare_performance_context(event,request)
+        self.prepare_performance_context(event,request,image_contract=indexed)
         reference = event.get_extra("qq_semantic_reference")
         if reference and not wants_existing_meme(event.get_message_str()) and not event.get_extra("qq_semantic_reference_attached"):
             info = {k:reference.get(k) for k in ("status","request","requested_by","reply")}
@@ -797,12 +797,18 @@ class PersonaModelBindings(Star):
             turn['status']=status
             self.save_context()
 
-    def prepare_performance_context(self,event,request):
+    def prepare_performance_context(self,event,request,image_contract=False):
         settings=self.config.get('performance',{})
-        if not settings.get('enabled',False):
+        if not settings.get('enabled',False) and not image_contract:
             return
         original=getattr(request,'contexts',None)
-        history,stats=plan_history(original,event.get_message_str(),settings)
+        if settings.get('enabled',False):history,stats=plan_history(original,event.get_message_str(),settings)
+        else:history=original or [];stats={'before_messages':len(history),'after_messages':len(history),'removed_history_images':0,'changed':False}
+        if image_contract:
+            from .image_history_compat import normalize_image_history
+            history,legacy=normalize_image_history(history);stats.update(legacy)
+            stats['changed']=stats['changed'] or bool(legacy['legacy_image_calls'])
+            stats['after_messages']=len(history)
         if stats['changed']:
             cache_path=getattr(self,'cache_path',None)
             if cache_path is not None:

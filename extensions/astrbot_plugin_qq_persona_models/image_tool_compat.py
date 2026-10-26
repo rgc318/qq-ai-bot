@@ -111,3 +111,5 @@ def normalize_chat_image_arguments(tool_name,args):
         return
     args.pop('return_result',None)
     args.pop('refs',None)
+    # This is server-owned execution state, never a model input parameter.
+    args.pop(IMAGE_GUARD_ERROR,None)
