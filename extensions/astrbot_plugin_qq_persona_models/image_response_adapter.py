@@ -4,6 +4,21 @@ from functools import wraps
 IMAGE_TOOLS={'generate_image','generate_selfie'}
 
 
+def stop_blocked_image_response(event,response):
+    """Finish a known blocked image retry before native lookup says not found."""
+    if not event or not event.get_extra('qq_image_task_contract_enabled') or getattr(response,'is_chunk',False):return False
+    state=event.get_extra('qq_image_failure_state') or {}
+    names=getattr(response,'tools_call_name',None) or []
+    if not state.get('blocked') or not names or not set(names).issubset(IMAGE_TOOLS):return False
+    sent=int(state.get('delivered_images',0))
+    prefix='本轮已发送'+str(sent)+'张图片，成功图片保留。' if sent else '这次没有启动新的图片生成。'
+    response.result_chain=None
+    response.completion_text=prefix+str(state.get('reason') or '本轮图片执行已停止')+'。这不是图片服务离线的检测结果；本轮已停止图片工具，不会在后台自动补画。'
+    response.tools_call_name=[];response.tools_call_args=[];response.tools_call_ids=[]
+    event.set_extra('qq_image_blocked_response_stopped',True)
+    return True
+
+
 def defer_notice(event,response):
     if not event or not event.get_extra('qq_image_task_contract_enabled') or not event.get_extra('qq_image_notice_defer_enabled') or getattr(response,'is_chunk',False):return False
     names=getattr(response,'tools_call_name',None) or []
@@ -40,7 +55,7 @@ class ImageResponseAdapter:
                 async for response in iterator:
                     if not getattr(runner,'streaming',True):
                         event=getattr(getattr(getattr(runner,'run_context',None),'context',None),'event',None)
-                        defer_notice(event,response)
+                        if not stop_blocked_image_response(event,response):defer_notice(event,response)
                     yield response
             finally:await iterator.aclose()
         owner._iter_llm_responses_with_fallback=wrapped

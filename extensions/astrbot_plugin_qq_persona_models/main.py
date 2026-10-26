@@ -35,7 +35,7 @@ from .image_batch import ImageBatchAdapter,validate_batch
 from .image_batch_timeout import ImageTimeoutAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.0")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.1")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

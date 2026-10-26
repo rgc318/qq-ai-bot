@@ -26,7 +26,7 @@ def validate_task(args,current_text,state):
     """All checks precede mutation/freezing. A declared reference intent is sticky."""
     started=time.perf_counter()
     plan=args.get('image_task')
-    if not isinstance(plan,dict):raise ImageTaskError('missing_task','缺少image_task。先结合本轮请求和来源判断任务，不要为通过校验直接填空参考。')
+    if not isinstance(plan,dict):raise ImageTaskError('missing_task','参数校验失败，图片工具存在但尚未执行，也没有检测图片接口是否可用。请按当前工具schema补齐image_task={"operation":"edit或reference或independent","reason":"结合来源判断的依据","independent_quote":"独立新图逐字引用本条原话，否则空串"}、reference_ids和逐图reference_notes；真实图片ID来自本轮目录或历史读取，不能编造或为通过校验直接填空参考。')
     operation=plan.get('operation')
     if operation not in OPERATIONS:raise ImageTaskError('invalid_operation','image_task.operation必须为independent、edit或reference')
     if operation in ('edit','reference'):state['requires_reference']=True

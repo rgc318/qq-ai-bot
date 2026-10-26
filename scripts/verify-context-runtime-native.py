@@ -245,7 +245,7 @@ async def run():
             try:
                 for repair in (True,False):
                     e=event('把之前的图改成毛绒玩偶');e.set_extra('qq_diagnostic',False)
-                    calls=[];seen_schemas=[]
+                    calls=[];seen_schemas=[];seen_contracts=[]
                     async def guarded_stub(ev,prompt):
                         calls.append({'prompt':prompt,'pixels':[Path(c.path).read_bytes() for c in ev.get_messages() if isinstance(c,Image)]})
                         return '合成图片执行已捕获，未调用图片模型或发图。'
@@ -261,8 +261,9 @@ async def run():
                         def get_model(self):return 'synthetic'
                         async def text_chat(self,**kw):
                             seen_schemas.append(kw['func_tool'].names() if kw.get('func_tool') else [])
+                            seen_contracts.append(kw['func_tool'].openai_schema() if kw.get('func_tool') else [])
                             n=len(seen_schemas)
-                            if n>2:return LLMResponse(role='assistant',completion_text='当前资料未确认，先澄清。')
+                            if n>2 and repair:return LLMResponse(role='assistant',completion_text='当前资料未确认，先澄清。')
                             ids=[chosen] if repair and n==2 else []
                             return LLMResponse(role='assistant',result_chain=e.plain_result('我来保留原造型，把材质改成绒布。'),tools_call_name=['generate_image'],tools_call_args=[{'prompt':'fixture','image_task':{'operation':'edit','reason':'沿用既有角色图','independent_quote':''},'reference_ids':ids,'reference_notes':[{'image_id':i,'purpose':'角色底稿'} for i in ids]}],tools_call_ids=['contract-'+str(n)])
                     async def starts(ctx,t,args):
@@ -284,6 +285,9 @@ async def run():
                         check('native_repeated_invalid_edit_has_zero_execution',not calls)
                         check('native_repeated_invalid_edit_has_no_notice',not e.get_extra('sent_texts'))
                         check('native_validation_budget_removes_tools',len(seen_schemas)==3 and 'generate_image' not in seen_schemas[-1])
+                        check('native_blocked_retry_never_returns_tool_not_found','连续两次' in runner.get_final_llm_resp().completion_text and not runner.get_final_llm_resp().tools_call_name)
+                    wire=next(t['function'] for t in seen_contracts[0] if t['function']['name']=='generate_image')
+                    check('native_provider_has_required_image_task_fields',{'image_task','reference_ids','reference_notes'}.issubset(wire['parameters']['required']))
                     await release(e)
             finally:adapter.restore()
             sys.path.insert(0,'/workspace/scripts')

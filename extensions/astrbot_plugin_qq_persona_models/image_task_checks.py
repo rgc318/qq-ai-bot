@@ -2,7 +2,7 @@
 from copy import deepcopy
 from types import SimpleNamespace
 from .image_task_contract import validate_task,consume_task,ImageTaskError,translate_reference_roles,complete_task
-from .image_response_adapter import defer_notice
+from .image_response_adapter import defer_notice,stop_blocked_image_response
 
 
 async def verify_image_tasks():
@@ -55,4 +55,27 @@ async def verify_image_tasks():
     checks['provider_plain_chain_notice_deferred']=defer_notice(event,response) and response.result_chain is None and not response.completion_text and bool(response.tools_call_args[0].get('pending_message'))
     response=SimpleNamespace(is_chunk=False,result_chain=SimpleNamespace(chain=[object()]),tools_call_name=['generate_image'],tools_call_args=[{}],completion_text='独立的富消息内容')
     checks['rich_media_result_preserved']=not defer_notice(event,response) and response.result_chain is not None
+    from astrbot.core.agent.tool import FunctionTool,ToolSet
+    from .image_tool_compat import prepare_chat_image_tools
+    from .model_logging import image_tool_contract_metadata
+    original=FunctionTool(name='generate_image',description='fixture SECRET_SCHEMA_SENTINEL',parameters={'type':'object','properties':{'prompt':{'type':'string'}}})
+    request=SimpleNamespace(func_tool=ToolSet(tools=[original]))
+    prepare_chat_image_tools(request,model_notice=True,indexed_references=True,task_contract=True,batch_images=True)
+    wire=request.func_tool.get_func_desc_openai_style()[0]['function']
+    keys={'image_task','reference_ids','reference_notes','pending_message'}
+    checks['provider_serializer_preserves_task_required_fields']=keys.issubset(wire['parameters']['required']) and keys.issubset(wire['parameters']['properties'])
+    checks['task_contract_visible_in_tool_description']='image_task=' in wire['description'] and 'reference_notes=' in wire['description']
+    metadata=image_tool_contract_metadata(request.func_tool)
+    checks['contract_metadata_has_required_flags_without_payload']=all(metadata['generate_image'][key]=={'present':True,'required':True} for key in keys) and 'SECRET_SCHEMA_SENTINEL' not in str(metadata) and metadata['generate_image']['count_maximum']==4
+    checks['contract_changes_do_not_mutate_registered_schema']='image_task' not in original.parameters['properties']
+    extras['qq_image_failure_state']={'blocked':True,'reason':'参数校验连续两次未通过（missing_task）','delivered_images':0}
+    def retry(names=None):return SimpleNamespace(is_chunk=False,result_chain=None,tools_call_name=names if names is not None else ['generate_image'],tools_call_args=[{}],tools_call_ids=['blocked'],completion_text='图片工具不存在')
+    response=retry()
+    checks['blocked_retry_ends_with_actual_reason']=stop_blocked_image_response(event,response) and 'missing_task' in response.completion_text and '工具不存在' not in response.completion_text and not response.tools_call_name and not response.tools_call_args and not response.tools_call_ids
+    extras['qq_image_failure_state']['delivered_images']=2;response=retry()
+    checks['blocked_retry_preserves_partial_delivery_count']=stop_blocked_image_response(event,response) and '已发送2张' in response.completion_text
+    response=retry(['search','generate_image'])
+    checks['blocked_mixed_response_is_not_replaced']=not stop_blocked_image_response(event,response) and response.tools_call_name==['search','generate_image']
+    extras['qq_image_failure_state']['blocked']=False;response=retry()
+    checks['valid_image_retry_is_not_replaced']=not stop_blocked_image_response(event,response) and response.tools_call_name==['generate_image']
     return {'passed':all(checks.values()),'checks':checks,'model_calls':0,'image_generations':0,'qq_messages_sent':0}

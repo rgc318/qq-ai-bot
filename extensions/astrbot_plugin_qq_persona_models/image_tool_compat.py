@@ -99,6 +99,8 @@ def prepare_chat_image_tools(request,model_notice=False,contextual_reference=Fal
         cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 当前为普通聊天：生成后自动发送图片；参考图由程序从当前消息和引用的图片中自动获取，不填写本地文件路径或插件内部参数。'
         if indexed_references:
             cloned.description=str(tool.description).split('Args:',1)[0].strip()+' 生成后自动发送图片。用reference_ids明确选择参考集合，独立新图填[]；先确认所选图的内容与来源，不填写文件路径。'
+        if task_contract:
+            cloned.description+=' 必填任务声明：image_task={operation:independent/edit/reference,reason:判断依据,independent_quote:独立新图时逐字引用本条用户原话，否则空串}；reference_ids=[真实图片ID]，reference_notes=[{image_id:同一ID,purpose:该图用途}]。独立新图后二者填[]；改图不可空参考。缺少这些参数是本地格式校验失败，不是图片模型离线；修正完整参数后才能执行。'
         if model_notice:
             cloned.description+=' 同一次工具调用中填写 pending_message，程序会在开始生图前先发送这句人格对白，无需另外调用发送消息工具。'
         result.tools.append(cloned)

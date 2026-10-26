@@ -83,6 +83,19 @@ def count_image_parts(contexts=(),image_urls=(),extra_parts=()):
     return len(image_urls or [])+count(extra_parts)+sum(count(r.get('content')) for r in contexts or [] if isinstance(r,dict))
 
 
+def image_tool_contract_metadata(tools):
+    """Observe final provider-bound fields, never argument or schema text."""
+    fields=('image_task','reference_ids','reference_notes','pending_message','image_prompts')
+    result={}
+    for tool in getattr(tools,'tools',[]) or []:
+        if tool.name not in ('generate_image','generate_selfie'):continue
+        schema=getattr(tool,'parameters',None) or {};props=schema.get('properties') or {};required=schema.get('required') or []
+        result[tool.name]={key:{'present':key in props,'required':key in required} for key in fields}
+        maximum=(props.get('count') or {}).get('maximum')
+        if type(maximum) is int:result[tool.name]['count_maximum']=maximum
+    return result
+
+
 class ModelActivityLogger:
     METHODS={'text_chat':'text','text_chat_stream':'text','get_embedding':'embedding',
              'get_embeddings':'embedding','get_embeddings_batch':'embedding','rerank':'rerank',
@@ -107,7 +120,7 @@ class ModelActivityLogger:
                  'recipient','confidence','judge_recent_messages','judge_recent_chars',
                  'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds','backend','generation',
                  'task_type','reference_count','validation_code','repair_attempts','notice_source',
-                 'batch_id','batch_index','requested_images','attempted_images','delivered_images'}
+                 'batch_id','batch_index','requested_images','attempted_images','delivered_images','image_tool_contract'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}
         for k,v in list(row.items()):
             if isinstance(v,str):row[k]=v.replace('\n',' ').replace('\r',' ')[:240]
@@ -173,6 +186,8 @@ class ModelActivityLogger:
             meta['image_count']=count_image_parts(kwargs.get('contexts'),kwargs.get('image_urls'),kwargs.get('extra_user_content_parts'))
             tools=kwargs.get('func_tool')
             meta['tool_count']=len(tools.names()) if tools and callable(getattr(tools,'names',None)) else 0
+            contract=image_tool_contract_metadata(tools)
+            if contract:meta['image_tool_contract']=contract
         if kind=='image':
             meta['mode']='edit' if kwargs.get('refs') or kwargs.get('user_refs') else 'generate'
             meta['node']=meta['provider']
