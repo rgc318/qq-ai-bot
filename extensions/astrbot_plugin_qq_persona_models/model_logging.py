@@ -120,7 +120,11 @@ class ModelActivityLogger:
                  'recipient','confidence','judge_recent_messages','judge_recent_chars',
                  'continuity_established','intervening_speakers','unclassified_turns','address_age_seconds','backend','generation',
                  'task_type','reference_count','validation_code','repair_attempts','notice_source',
-                 'batch_id','batch_index','requested_images','attempted_images','delivered_images','image_tool_contract'}
+                 'batch_id','batch_index','requested_images','attempted_images','delivered_images','image_tool_contract',
+                 'history_image_candidates','initial_history_images','preview_bytes','history_read_tools','proactive',
+                 'context_images_viewed','image_candidates','history_images','current_images','source_message_ids',
+                 'messages','task_records','source_ids','returned_images','task_status','deduplicated_images','deduplicated_chars',
+                 'provided_source_count','viewed_source_count','segment_index','wait_seconds','send_seconds','delivery_seconds'}
         row={'event':state,**{k:v for k,v in fields.items() if k in allowed and v is not None}}
         for k,v in list(row.items()):
             if isinstance(v,str):row[k]=v.replace('\n',' ').replace('\r',' ')[:240]
@@ -133,6 +137,8 @@ class ModelActivityLogger:
                         'request_ready':'正文请求已准备','routing_done':'接话路由结束',
                         'reply_done':'本轮模型回复结束','sent':'消息发送完成'}
                 labels['image_reference_check']='绘图参考图检查'
+                labels['task_evidence_check']='任务资料与执行核对'
+                labels['first_segment_sent']='首段平台发送已返回'
                 if state=='routing_done' and row.get('next')=='main_reply_not_started':
                     labels[state]='判断超时，未进入正文生成' if row.get('error_type')=='TimeoutError' else '判断失败，未进入正文生成' if row.get('reason')=='judge_unavailable' else '本条未进入正文生成'
                 if state=='routing_done' and str(row.get('reason','')).startswith('context_review_'):labels[state]='判断未完成，转主模型核对上下文'
@@ -148,7 +154,23 @@ class ModelActivityLogger:
         original=getattr(owner,name,None)
         if original is None:return
         owned=name in owner.__dict__
+        # A reloaded module has new ContextVars, so its guard cannot deduplicate
+        # an orphaned wrapper from the old module. Remove only top layers whose
+        # executable code belongs to this exact logging module, never wrappers
+        # installed by another plugin (even if functools copied our attributes).
+        while callable(original) and getattr(original,'__wrapped__',None) is not None:
+            code=getattr(original,'__code__',None)
+            if not code or not code.co_filename.replace('\\','/').endswith('/model_logging.py'):break
+            previous=getattr(original,'_qq_model_activity_owner',None)
+            if previous is None:
+                previous=next((c.cell_contents for c in (getattr(original,'__closure__',None) or ())
+                    if hasattr(c.cell_contents,'patches') and type(c.cell_contents).__name__=='ModelActivityLogger'),None)
+            if previous is None:break
+            old=next((p for p in previous.patches if p[0] is owner and p[1]==name),None)
+            if old:owned=old[-1]
+            original=original.__wrapped__
         wrapper=build(original)
+        wrapper._qq_model_activity_owner=self
         setattr(owner,name,wrapper);self.patches.append((owner,name,wrapper,original,owned))
 
     def restore(self):
@@ -231,6 +253,10 @@ class ModelActivityLogger:
                 try:observer(meta,exc)
                 except Exception:pass
         if record['first'] is not None:meta['first_output_seconds']=record['first']
+        observer=getattr(self,'request_outcome_observer',None)
+        if observer and meta.get('purpose')=='main_reply' and state in ('error','cancelled'):
+            try:observer(meta,state)
+            except Exception:pass
         self.active.pop(meta['call'],None);self.counts[state]+=1
         self.recent.append(self.emit(state,**meta))
 

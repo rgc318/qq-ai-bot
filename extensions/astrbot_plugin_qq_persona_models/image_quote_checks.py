@@ -1,5 +1,6 @@
 """Authenticated, read-only QQ quote diagnostics. Never send messages."""
 import asyncio
+from .persona_bindings import binding_map
 from urllib.parse import urlsplit,parse_qs,urlencode,urlunsplit
 
 
@@ -41,7 +42,7 @@ async def inspect_quoted_image(plugin,payload):
         checks={'reference_recovered':bool(paths) and all(Path(p).is_file() for p in paths),'exact_original_md5_match':all(hashlib.md5(Path(p).read_bytes()).hexdigest()==t.split('.')[0].lower() for p,t in zip(paths,tokens)),'drawing_tool_receives_same_original':safe==paths}
         report.update(checks=checks,passed=all(checks.values()),recovery=event.get_extra('qq_quote_image_recovered'),seconds=round(time.monotonic()-started,4),recovered_files=paths)
         if payload.get('call_model'):
-            provider=plugin.context.get_provider_by_id(plugin.config['bindings']['大肥鱼'])
+            provider=plugin.context.get_provider_by_id(binding_map(plugin.config)['大肥鱼'])
             response=await provider.text_chat(prompt='只根据这张图片，用一句话描述画面主体及其头顶的物体。不要参考其他对话。',image_urls=paths,contexts=[],func_tool=None)
             report.update(model_calls=1,vision_model=provider.get_model(),vision_description=response.completion_text)
         return report

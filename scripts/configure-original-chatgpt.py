@@ -4,6 +4,9 @@ import json
 from datetime import datetime
 
 from deployment_api import DeploymentAPI, ROOT, write_report
+import sys
+sys.path.insert(0, str(ROOT / 'extensions/astrbot_plugin_qq_persona_models'))
+from persona_bindings import binding_map,binding_rows
 
 
 api = DeploymentAPI()
@@ -33,7 +36,9 @@ provider.update(enable=True, type="openai_chat_completion", modalities=["text", 
 provider["custom_extra_body"] = {**provider.get("custom_extra_body", {}),
     "max_tokens": 4096, "reasoning_effort": "low", "allowed_openai_params": ["reasoning_effort"]}
 config = copy.deepcopy(old_config)
-config["bindings"]["ChatGPT龙娘"] = provider_id
+bindings = binding_map(config)
+bindings["ChatGPT龙娘"] = provider_id
+config["bindings"] = binding_rows(bindings)
 try:
     api.call("/api/config/provider/update", {"id": provider_id, "config": provider})
     api.call(plugin_path, {"config": config}, method="PUT", timeout=120)

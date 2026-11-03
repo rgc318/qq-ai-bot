@@ -2,7 +2,10 @@
 import argparse
 from datetime import datetime
 import json
+import sys
 from pathlib import Path
+
+sys.stdout.reconfigure(encoding='utf-8',errors='replace')
 import subprocess
 import time
 from uuid import uuid4
@@ -16,7 +19,8 @@ def docker(*args,timeout=120):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--same-volume',action='store_true');parser.add_argument('--models',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--same-volume',action='store_true');parser.add_argument('--models',action='store_true');parser.add_argument('--architecture-audit',action='store_true');args=parser.parse_args()
+    if args.architecture_audit and args.models:parser.error('Architecture audit never calls models')
     info=json.loads(docker('inspect','qq-ai-bot-astrbot-1').stdout)[0]
     name='qq-context-runtime-'+uuid4().hex[:10]
     cmd=['run','--rm','--name',name,'--network','none','--read-only','--memory','1g','--cap-drop','ALL','--security-opt','no-new-privileges','--tmpfs','/tmp:rw,size=128m','-e','PYTHONDONTWRITEBYTECODE=1','-e','TZ=Asia/Shanghai']
@@ -26,7 +30,8 @@ def main():
         docker('exec','qq-ai-bot-astrbot-1','python','-c','from pathlib import Path;p=Path('+repr('/AstrBot/data/'+subpath)+');assert p.parent==Path("/AstrBot/data/temp");p.mkdir()')
         cmd+=['--mount','type=volume,source='+volume+',destination=/AstrBot/data,volume-subpath='+subpath]
     else:cmd+=['--tmpfs','/AstrBot/data:rw,size=256m']
-    for src,dst in [('extensions','/workspace/extensions'),('integrations','/workspace/integrations'),('downloads/contextaware-f026c56','/candidate'),('downloads/omnidraw-native-source','/omni-source'),('scripts','/workspace/scripts'),('scripts/verify-context-runtime-native.py','/workspace/verify.py')]:
+    verification='scripts/audit-context-architecture-native.py' if args.architecture_audit else 'scripts/verify-context-runtime-native.py'
+    for src,dst in [('extensions','/workspace/extensions'),('integrations','/workspace/integrations'),('downloads/contextaware-f026c56','/candidate'),('downloads/omnidraw-native-source','/omni-source'),('scripts','/workspace/scripts'),(verification,'/workspace/verify.py')]:
         cmd+=['--mount','type=bind,src=/mnt/e/AI/ai/qq-ai-bot/'+src+',dst='+dst+',readonly']
     cmd+=['--entrypoint','python',info['Image'],'/workspace/verify.py']
     try:result=docker(*cmd)
@@ -36,9 +41,14 @@ def main():
         docker('rm','-f',name);raise
     report=json.loads(next(l.split('=',1)[1] for l in result.stdout.splitlines() if l.startswith('RUNTIME_REPORT=')))
     probes=report.pop('model_probes',{})
+    if 'task_evidence' in report:
+        evidence_probes=report['task_evidence'].pop('model_probes',{})
+        (ROOT/'logs/task-evidence-probes.local.json').write_text(json.dumps(evidence_probes,ensure_ascii=False),encoding='utf-8')
+    if args.architecture_audit:
+        (ROOT/'logs/context-architecture-probes.local.json').write_text(json.dumps(probes,ensure_ascii=False),encoding='utf-8')
     report['storage']='isolated_subdirectory_on_production_volume' if args.same_volume else 'tmpfs'
     report['runtime_image']=info['Image']
-    path=ROOT/'logs'/('context-runtime-'+('volume' if args.same_volume else 'isolated')+'.json')
+    path=ROOT/'logs'/('context-architecture-audit.json' if args.architecture_audit else 'context-runtime-'+('volume' if args.same_volume else 'isolated')+'.json')
     path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(report,ensure_ascii=False,indent=2))
     assert report['passed']

@@ -18,6 +18,16 @@ class StoreTests(unittest.TestCase):
         for asset_id in record['ids']:self.store.retain(record['scope'],record['epoch'],asset_id,data,'image/png','png')
     def test_duplicate_event_is_idempotent(self):
         a=self.record();b=self.record();self.assertEqual(a,b);self.assertEqual(self.store.stats()['messages'],1)
+    def test_recovered_message_preserves_original_time_and_expiry(self):
+        record=self.store.record('s','bot:G','old','A','A','old image',[{'type':'image','source':{}}],received_at=800.)
+        source=self.store.source('s',record['epoch'],record['ids'][0])
+        self.assertEqual(source['created'],800.)
+        self.assertEqual(source['expires'],800.+86400)
+        self.assertEqual(self.store.messages(self.store.snapshot('s'),message_id='old')[0]['received_at'],800.)
+    def test_invalid_recovered_timestamps_rejected(self):
+        for value in (0,-1,float('nan'),float('inf'),2000):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                self.store.record('s','bot:G','bad','A','A','',[],received_at=value)
     def test_source_brief_uses_original_generated_request_and_scope(self):
         request=self.store.record('s','bot:G','request','A','A','基于角色原图生成完整三视图',[])
         generated=self.store.record('s','bot:G','result','bot','AI','已发送图片',[{'type':'image','source':{'generated':True,'request_seq':request['seq']}}],kind='generated')

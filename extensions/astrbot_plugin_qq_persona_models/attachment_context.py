@@ -17,6 +17,7 @@ from .attachment_store import AttachmentStore
 from .document_reader import read_excerpt
 from .image_followup import local_image_path,public_activity
 from .recent_uploads import _REF,_NEW
+from .persona_bindings import binding_map
 
 TOOL_NAMES={'read_group_message','view_context_images','read_context_document','browse_group_history'}
 
@@ -69,7 +70,7 @@ class AttachmentContext:
         def add(items,origin='',sender='',name=''):
             for i,c in enumerate(items):
                 if isinstance(c,Reply):
-                    result.append({'type':'reply','message_id':str(c.id),'text':str(getattr(c,'message_str','') or '')[:1000]})
+                    result.append({'type':'reply','message_id':str(c.id),'user_id':str(c.sender_id),'text':str(getattr(c,'message_str','') or '')[:1000]})
                     add(c.chain or [],str(c.id),str(c.sender_id),str(getattr(c,'sender_nickname','') or ''))
                 elif isinstance(c,(Image,File,Record,Video)):
                     filename=str(getattr(c,'name','') or '')
@@ -205,7 +206,7 @@ class AttachmentContext:
             if row['type']=='image' and not row['generated'] and row['sender']==str(event.get_sender_id()) and row['age_seconds']<=float(self.settings.get('auto_attach_seconds',180)):
                 key=(row['message_id'],row['position'])
                 if not any((r['message_id'],r['position'])==key for r in candidates):candidates.append(row)
-        if not explicit and self.settings.get('auto_attach',True) and len(candidates)==1 and _REF.search(event.get_message_str()) and not _NEW.search(event.get_message_str()):
+        if not event.get_extra('qq_shared_context_enabled') and not explicit and self.settings.get('auto_attach',True) and len(candidates)==1 and _REF.search(event.get_message_str()) and not _NEW.search(event.get_message_str()):
             candidate=candidates[0]
             if candidate['state']=='pending':
                 job=self.jobs.get(candidate['id'])
@@ -297,7 +298,7 @@ class AttachmentContext:
         from mcp.types import CallToolResult,TextContent,ImageContent
         context=getattr(self.plugin,'context',None)
         if context and hasattr(context,'get_provider_by_id'):
-            provider_id=event.get_extra('selected_provider') or self.plugin.config.get('bindings',{}).get(self.plugin.routing_persona(event))
+            provider_id=event.get_extra('selected_provider') or binding_map(self.plugin.config).get(self.plugin.routing_persona(event))
             provider=context.get_provider_by_id(provider_id) if provider_id else None
             modalities=(getattr(provider,'provider_config',{}) or {}).get('modalities')
             if modalities and 'image' not in modalities:raise ValueError('当前聊天模型未启用视觉输入，不能声称看到了图片')

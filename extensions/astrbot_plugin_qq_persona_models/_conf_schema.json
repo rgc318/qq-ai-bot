@@ -1,9 +1,23 @@
 {
+  "reply_delivery":{"type":"object","description":"分段回复发送","items":{
+    "first_segment_immediate":{"type":"bool","description":"首段立即发送，跳过首段的人为停顿；后续段落沿用AstrBot的分段间隔。仅允许群的原生非流式模型回复生效","default":true}
+  }},
+  "task_completion":{"type":"object","description":"资料可见状态与任务完成检查（不调用独立审核模型）","items":{
+    "enabled":{"type":"bool","description":"在非流式原生Agent中校验模型声明的资料和执行状态；明确矛盾时最多纠正一次。普通无状态闲聊不额外调用模型","default":true}
+  }},
   "multimodal_context":{"type":"object","description":"统一消息与附件上下文","items":{
     "enabled":{"type":"bool","description":"登记允许群的消息和附件，支持按ID回看；关闭后使用原有短期承接","default":false},
-    "auto_attach":{"type":"bool","description":"同一成员近期唯一相关图片直接附加，不增加选图模型调用","default":true},
-    "auto_attach_seconds":{"type":"int","description":"直接附图窗口秒数，不是素材保存期","default":180},
-    "on_demand_read":{"type":"bool","description":"允许模型按需调用群消息回看、历史看图及文档读取；关闭后仍可直接承接近期唯一图片","default":true},
+    "auto_attach":{"type":"bool","description":"直接向当前视觉模型提供预算内的近期图片预览；两个上下文后端均生效，不增加选图模型调用","default":true},
+    "auto_attach_seconds":{"type":"int","description":"旧版独立附件接口的兼容时窗；当前统一上下文的预览时窗在下方配置","default":180},
+    "recent_input":{"type":"object","description":"统一近期多模态输入（本地与ContextAware共用）","items":{
+      "messages":{"type":"int","description":"近期消息数量上限（1到40），包含多成员与纯图片消息","default":16},
+      "chars":{"type":"int","description":"近期文字与来源元数据预算（800到12000字符）","default":6000},
+      "max_images":{"type":"int","description":"直接提供的近期历史图片上限（0到4），不猜唯一目标","default":4},
+      "max_edge":{"type":"int","description":"视觉预览最长边（256到1600像素）；编辑仍使用原图","default":1024},
+      "max_bytes":{"type":"int","description":"每轮历史视觉预览总字节预算（默认1MiB，不含base64开销）","default":1048576},
+      "max_age_seconds":{"type":"int","description":"预览候选最长时间，仍受原素材保存期及消息窗口限制","default":86400}
+    }},
+    "on_demand_read":{"type":"bool","description":"允许模型按需回看更早消息、高清图片和文字文档；与近期直接预览分别控制","default":true},
     "documents":{"type":"bool","description":"允许按需本地解析文字PDF、DOCX、TXT/MD和CSV/XLSX，不自动进行OCR","default":true},
     "media_ttl_seconds":{"type":"int","description":"素材副本保存秒数，达到容量限额可能更早淘汰","default":86400},
     "message_ttl_seconds":{"type":"int","description":"新增消息索引保留秒数，不影响既有长期记忆","default":604800},
@@ -12,7 +26,24 @@
     "scope_bytes":{"type":"int","description":"每策略范围素材容量字节","default":134217728},
     "total_bytes":{"type":"int","description":"全部范围素材总容量字节","default":536870912}
   }},
-  "bindings": {"type":"dict","description":"人格 ID 到 AstrBot Provider ID 的映射","items":{},"default":{"大肥鱼":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017","ChatGPT龙娘":"qq-dragon-sol-low"}},
+  "bindings": {
+    "type":"template_list",
+    "description":"人格与聊天模型绑定",
+    "hint":"添加或展开一条绑定，分别选择已创建的人格和已配置的聊天模型。每个人格保留一条；重复时以最后一条完整绑定为准。未填写完整的条目不生效。此处不配置生图节点。",
+    "default":[
+      {"__template_key":"binding","persona_id":"大肥鱼","provider_id":"litellm-lan/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+      {"__template_key":"binding","persona_id":"ChatGPT龙娘","provider_id":"litellm-lan/cliproxyapi/gpt-6.1-sol"}
+    ],
+    "templates":{
+      "binding":{
+        "name":"人格模型绑定",
+        "items":{
+          "persona_id":{"type":"string","description":"人格","hint":"从 AstrBot 人格列表中选择。","default":"","_special":"select_persona"},
+          "provider_id":{"type":"string","description":"聊天模型","hint":"从 AstrBot 已配置的聊天模型中选择；请先在模型提供商中添加并启用需要的模型。","default":"","_special":"select_provider"}
+        }
+      }
+    }
+  },
   "contextual_image_followup":{"type":"object","description":"从上下文承接图片请求","items":{
     "enabled":{"type":"bool","description":"保留图片会话的真实执行状态和参考图，供模型理解后续追问","default":true},
     "window_seconds":{"type":"int","description":"图片会话关联有效期秒数","default":86400},

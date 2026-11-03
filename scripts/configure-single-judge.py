@@ -6,8 +6,8 @@ api=DeploymentAPI()
 provider=next(p for p in api.call('/api/config/provider/template')['data']['providers'] if p['id']=='qq-reply-judge-fast')
 api.backup('judge-before-single-judge-20261023.json',provider)
 provider=copy.deepcopy(provider)
-provider['model']='siliconflow/Qwen/Qwen3-30B-A3B-Instruct-2507'
-provider['custom_extra_body']={'max_tokens':180,'temperature':0.1,'response_format':{'type':'json_object'}}
+provider['model']='siliconflow/deepseek-ai/DeepSeek-V4.1-Flash'
+provider['custom_extra_body']={'enable_thinking':False,'max_tokens':240,'temperature':0.1,'response_format':{'type':'json_object'}}
 api.call('/api/config/provider/update',{'id':provider['id'],'config':provider})
 name='astrbot_plugin_qq_persona_models'
 config=api.call('/api/v1/plugins/'+name+'/config')['data']['config']

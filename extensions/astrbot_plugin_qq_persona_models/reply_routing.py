@@ -34,7 +34,8 @@ route 只能为 addressed、followup、ambient。
 last_ai_activity.age_seconds 表示距 AI 任务的时间。隔了较久仍明确提到该任务、内容或修改要求时，可以继续接话，不因时间长就拒绝；但时间越久、期间新话题越多，越不能只凭“继续”“再来一个”等模糊词判断延续，指代不明时选 ambient。
 识别否定、玩笑和转述：“不用给我也做一份”“他说‘给我也整一份’然后走了”“这次别回我”不应触发。不要因为出现“你”“也”“继续”等词就机械触发。
 recent_image_activity 是独立保留的近期图片会话事实，问候或其他普通回复不会把它覆盖。结合原请求、助手回复和执行状态判断用户是否在催办或继续；“图呢”“你说好的呢”等可以指向此前未执行的改图，即使中间出现别的聊天。not_called 只是未调用图片工具，需先确认原请求确为绘图，不要把普通看图问答误判成欠图。不要机械把 hello 等问候当作重画请求。
-只有高把握时 addressed/followup，否则 ambient。followup 必须返回相应 last_ai_activity.id 或 recent_image_activity.id 作为 anchor_id，选择实际被延续的那件事；addressed 可为空。
+ai_activities 保留不同成员的多项近期任务；新任务不会代表旧任务已结束。结合消息来源判断实际在延续哪一项，不默认最近的一项覆盖所有人。
+只有高把握时 addressed/followup，否则 ambient。followup 必须返回相应 last_ai_activity.id、recent_image_activity.id 或 ai_activities 中的 id 作为 anchor_id，选择实际被延续的那件事；addressed 可为空。
 必须同时明确 recipient（bot/human/unclear）和 silence_requested（是否明确要求AI不要回复）。recipient=bot 且未要求沉默时，即使没有任务也应 addressed；不能输出“在叫AI但没有任务所以不答”。
 只输出 JSON：{"recipient":"bot|human|unclear","silence_requested":false,"route":"followup|addressed|ambient","confidence":0.0到1.0,"anchor_id":"输入中的AI活动ID或空字符串","reason":"一句话理由"}。不得输出聊天正文或调用工具。"""
 
@@ -62,6 +63,7 @@ class GroupContext:
     image_turn: dict | None = None
     image_hydration_attempted: bool = False
     image_uploads: dict = field(default_factory=dict)
+    tasks: OrderedDict = field(default_factory=OrderedDict)
 
 
 class ReplyRouter:
@@ -70,6 +72,7 @@ class ReplyRouter:
         self.judge = judge
         self.clock = clock
         self.groups: OrderedDict[str, GroupContext] = OrderedDict()
+        self.scoped_groups: OrderedDict[tuple[str,str],GroupContext] = OrderedDict()
         self.stats = Counter()
         self.semaphore = asyncio.Semaphore(2)
         # Background chatter gets its own lane; it cannot occupy both slots
@@ -84,12 +87,39 @@ class ReplyRouter:
             self.groups.popitem(last=False)
         return self.groups[group]
 
-    def note_ai(self, group: str, text: str, *, request: str = "", sender: str = "", pending=False, message_id=""):
-        ctx = self.context(group)
+    def select_scope(self,group,scope):
+        ctx=self.context(group)
+        if ctx.scope and ctx.scope!=scope:
+            self.scoped_groups[(group,ctx.scope)]=ctx
+            self.groups[group]=self.scoped_groups.pop((group,scope),GroupContext(scope=scope))
+            while len(self.scoped_groups)>64:
+                stale=next((k for k,v in self.scoped_groups.items() if not any(t['status']=='pending' for t in v.tasks.values())),None)
+                if stale is None:break
+                del self.scoped_groups[stale]
+        self.groups[group].scope=scope
+        return self.groups[group]
+
+    def request_context(self,group,scope=None):
+        ctx=self.context(group)
+        if not scope or ctx.scope==scope:return ctx
+        return self.scoped_groups.get((group,scope))
+
+    def note_ai(self, group: str, text: str, *, request: str = "", sender: str = "", pending=False, message_id="",scope=None):
+        ctx = self.request_context(group,scope)
+        if ctx is None:return
         ctx.sequence += 1
         # Capture the original request as well as the answer so "another one"
         # still has an anchor after unrelated messages fill the recent buffer.
-        ctx.last_ai = {"id":f"ai-{ctx.sequence}","time":self.clock(),"status":"pending" if pending else "sent","request":request[:600],"requested_by":sender,"reply":text[:1600]}
+        key='request:'+str(message_id) if message_id else 'ai-'+str(ctx.sequence)
+        previous=ctx.tasks.get(key)
+        ctx.last_ai = {**(previous or {}),"id":previous['id'] if previous else f"ai-{ctx.sequence}","time":self.clock(),"status":"pending" if pending else "sent","request":request[:600],"requested_by":sender,"reply":text[:1600],"message_id":str(message_id)}
+        ctx.tasks[key]=ctx.last_ai;ctx.tasks.move_to_end(key)
+        while len(ctx.tasks)>32:
+            finished=next((k for k,v in ctx.tasks.items() if v['status']!='pending'),None)
+            if finished is None:break
+            del ctx.tasks[finished]
+        # Active records are not silently evicted; ingress capacity remains
+        # controlled by AstrBot, not an ad-hoc semantic task queue.
         ctx.latest_requests.pop(sender, None)
         if not pending:
             # A context-review fallback is deliberately not classified as bot-
@@ -101,6 +131,35 @@ class ReplyRouter:
                         if not row.get('targets_other'):row['directed_to_bot']=True
                         break
             ctx.messages.append({"role":"assistant","sender":"bot","name":"AI","requested_by":sender,"time":self.clock(),"text":text[:1000]})
+
+    def finish_request(self,group,message_id,scope=None):
+        ctx=self.request_context(group,scope)
+        task=ctx.tasks.get('request:'+str(message_id)) if ctx else None
+        if task and task['status']=='pending':
+            task['status']='incomplete';task['time']=self.clock()
+
+    def update_request(self,group,message_id,scope=None,**fields):
+        ctx=self.request_context(group,scope)
+        task=ctx.tasks.get('request:'+str(message_id)) if ctx else None
+        if task:
+            task.update({k:v for k,v in fields.items() if k in ('status','error_type','selected_reference_ids','image_tool_status','task_status','evidence_status')})
+
+    def observe(self,group,rows,current_id,self_id):
+        """Use the same immutable, authorized facts as the main request."""
+        ctx=self.context(group);previous={str(r.get('message_id')):r for r in ctx.messages if r.get('message_id')}
+        observed=[]
+        for row in rows:
+            if str(row['message_id'])==str(current_id):continue
+            old=previous.get(str(row['message_id']),{})
+            targets=[str(p['user_id']) for p in row['parts'] if p.get('type')=='at']
+            observed.append({'role':'assistant' if row['kind'] in ('assistant','generated') or row['sender']==str(self_id) else 'user',
+                'sender':row['sender'],'name':row['name'],'message_id':row['message_id'],'text':row['text'][:800],
+                'time':self.clock()-max(0,time.time()-row['received_at']),
+                'image_count':sum(a['type']=='image' for a in row['attachments']),
+                'attachments':[{k:a[k] for k in ('id','type','message_id','state','position')} for a in row['attachments']],
+                'reply_to':[p['message_id'] for p in row['parts'] if p.get('type')=='reply'],
+                'targets_other':any(t!=str(self_id) for t in targets),'directed_to_bot':old.get('directed_to_bot',False) or str(self_id) in targets})
+        ctx.messages=deque(observed[-40:],maxlen=40)
 
     def note_progress(self, group, text, *, sender, kind='progress'):
         # Already-sent courtesy lines and tool outcomes belong in the receiver
@@ -116,18 +175,19 @@ class ReplyRouter:
 
     def snapshot(self, wall_time=None):
         now=self.clock()
-        groups={}
-        for group,ctx in self.groups.items():
+        def serialize(ctx):
             def timed(record):
                 return {**record,'time':max(0,now-record['time'])}
             anchor=ctx.last_ai
             messages=[{**{k:v for k,v in row.items() if k!='time'},**({'age_seconds':max(0,now-row['time'])} if isinstance(row.get('time'),(int,float)) else {})} for row in ctx.messages]
-            groups[group]={'scope':ctx.scope,'sequence':ctx.sequence,'messages':messages,
+            return {'scope':ctx.scope,'sequence':ctx.sequence,'messages':messages,
+                'tasks':{k:timed(v) for k,v in ctx.tasks.items()},
                 'image_uploads':{s:timed(r) for s,r in ctx.image_uploads.items() if now-r['time']<=600},
                 'last_ai':timed(anchor) if anchor else None,
                 'image_turn':timed(ctx.image_turn) if ctx.image_turn else None,
                 'latest_requests':{s:timed(r) for s,r in ctx.latest_requests.items() if now-r['time'] <= 300}}
-        return {'version':1,'saved_at':time.time() if wall_time is None else wall_time,'groups':groups}
+        return {'version':1,'saved_at':time.time() if wall_time is None else wall_time,'groups':{g:serialize(c) for g,c in self.groups.items()},
+                'scoped_groups':[{'group':g,'data':serialize(c)} for (g,_),c in self.scoped_groups.items()]}
 
     def restore(self, data, wall_time=None):
         if data.get('version')!=1:
@@ -139,11 +199,13 @@ class ReplyRouter:
         if elapsed < -5 or elapsed > max_window:
             return
         elapsed=max(0,elapsed)
-        for group,row in list(data.get('groups',{}).items())[-32:]:
+        rows=[(r.get('group'),r.get('data',{}),True) for r in data.get('scoped_groups',[])][-64:]+[(g,r,False) for g,r in list(data.get('groups',{}).items())[-32:]]
+        for group,row,cached in rows:
             if group not in self.settings.get('allowed_groups',[]):
                 continue
-            ctx=self.context(group)
+            ctx=GroupContext() if cached else self.context(group)
             ctx.scope=str(row.get('scope',''))
+            if cached:self.scoped_groups[(group,ctx.scope)]=ctx
             ctx.sequence=int(row.get('sequence',0))
             def live(record,limit):
                 age=float(record['time'])+elapsed
@@ -154,6 +216,11 @@ class ReplyRouter:
             anchor=row.get('last_ai')
             if anchor:
                 ctx.last_ai=live(anchor,min(window,120) if anchor.get('status')=='pending' else window)
+            for key,task in list(row.get('tasks',{}).items())[-64:]:
+                restored=live(task,max(window,image_window))
+                if restored:
+                    if restored['status']=='pending':restored['status']='interrupted'
+                    ctx.tasks[key]=restored
             if row.get('image_turn'):
                 ctx.image_turn=live(row['image_turn'],image_window)
                 if ctx.image_turn and ctx.image_turn.get('status')=='running':ctx.image_turn['status']='interrupted'
@@ -171,10 +238,11 @@ class ReplyRouter:
         self.stats['reason:'+reason] += 1
         return {"route":route,"reason":reason,**extra}
 
-    async def decide(self, group: str, sender: str, text: str, *, name="", message_id="", explicit=False, targets_other=False):
+    async def decide(self, group: str, sender: str, text: str, *, name="", message_id="", explicit=False, targets_other=False,observations=None,metadata=None,self_id=''):
         if not self.settings.get("enabled",True) or group not in self.settings.get("allowed_groups",[]):
             return self._result("ignored","outside_scope")
         ctx = self.context(group)
+        if observations is not None:self.observe(group,observations,message_id,self_id)
         if message_id and message_id in ctx.seen:
             return self._result("duplicate","same_message_id")
         if message_id:
@@ -183,6 +251,7 @@ class ReplyRouter:
                 ctx.seen.popitem(last=False)
         text = text.strip()
         incoming_row={"role":"user","sender":sender,"name":name[:60],"text":text[:800],"message_id":message_id,"time":self.clock(),"targets_other":targets_other,"directed_to_bot":bool(explicit)}
+        if metadata:incoming_row.update(metadata)
         ctx.messages.append(incoming_row)
         if text and not targets_other and not text.startswith('/') and not _ACK.fullmatch(text):
             ctx.latest_requests[sender]={'time':self.clock(),'text':text[:1200]}
@@ -197,7 +266,8 @@ class ReplyRouter:
         # A group question can be answered by another participant too. This
         # merely permits semantic judgment, rather than automatically replying.
         answer_to_ai_question=bool(ctx.last_ai and re.search(r'[?？]',ctx.last_ai.get('reply','')) and self.clock()-ctx.last_ai['time']<=180)
-        if not text or text.startswith("/") or _ACK.fullmatch(text) and not answer_to_ai_question:
+        has_media=bool(metadata and metadata.get('attachments'))
+        if (not text and not has_media) or text.startswith("/") or (observations is None and _ACK.fullmatch(text) and not answer_to_ai_question):
             return self._result("ambient","non_request_or_command")
         now = self.clock()
         aliases = self.settings.get("aliases",[])
@@ -213,7 +283,8 @@ class ReplyRouter:
             anchor = None
         image_turn=ctx.image_turn if self.settings.get('image_context_enabled',True) else None
         if image_turn and now-image_turn['time']>float(self.settings.get('image_followup_window_seconds',86400)):image_turn=None
-        anchors={a['id']:a for a in (anchor,image_turn) if a}
+        retained=[a for a in ctx.tasks.values() if now-a['time']<=float(self.settings.get('image_followup_window_seconds',86400))]
+        anchors={a['id']:a for a in [*retained,anchor,image_turn] if a}
         def context_fallback(reason,**extra):
             handoff=any(r.get('sender')==sender and r.get('targets_other') and r.get('time',0)>=image_turn['time'] for r in list(ctx.messages)[-13:-1]) if image_turn else True
             if not image_turn or image_turn.get('requested_by')!=sender or handoff or not self.settings.get('image_followup_fallback',True):return None
@@ -224,7 +295,7 @@ class ReplyRouter:
         image_evidence=bool(image_turn and (image_turn.get('requested_by')==sender or has_alias or _PRIORITY_HINT.search(text)))
         recent_addressing=any(old.get('role')=='user' and not old.get('targets_other') and (old.get('directed_to_bot') or any(alias.casefold() in old.get('text','').casefold() for alias in aliases if alias)) and (not isinstance(old.get('time'),(int,float)) or now-old['time']<=180) for old in list(ctx.messages)[-13:-1])
         recent_addressing = recent_addressing or continuity['established']
-        if anchor is None and not image_evidence and not has_alias and not capability_request and not recent_addressing:
+        if observations is None and anchor is None and not image_evidence and not has_alias and not capability_request and not recent_addressing:
             return self._result("ambient","no_recent_ai_task_or_address")
         interval = float(self.settings.get("user_min_interval_seconds",2))
         if now-ctx.fast_times.get(sender,-1e9) < interval:
@@ -252,7 +323,7 @@ class ReplyRouter:
             if budget<=0: break
             rows.append(clipped)
             budget-=len(clipped['text'])
-        payload = {"bot_aliases":aliases,"recent_addressing_evidence":recent_addressing,"dialogue_continuity":continuity,"last_ai_activity":judged_anchor,"recent_image_activity":public_activity(image_turn,now),"recent_messages":list(reversed(rows)),"latest_message":{"sender":sender,"name":name[:60],"text":text[:1200]}}
+        payload = {"bot_aliases":aliases,"recent_addressing_evidence":recent_addressing,"dialogue_continuity":continuity,"last_ai_activity":judged_anchor,"ai_activities":[{**a,'age_seconds':round(max(0,now-a['time']),1)} for a in retained[-8:]],"recent_image_activity":public_activity(image_turn,now),"recent_messages":list(reversed(rows)),"latest_message":{"sender":sender,"name":name[:60],"text":text[:1200],**(metadata or {})}}
         judge_evidence = {'judge_recent_messages':len(rows),'judge_recent_chars':sum(len(row['text']) for row in rows),
             'continuity_established':continuity['established'],'intervening_speakers':continuity['other_speaker_count'],
             'unclassified_turns':continuity['unclassified_turns'],'address_age_seconds':continuity.get('origin_age_seconds')}
@@ -281,7 +352,7 @@ class ReplyRouter:
                 return self._result("ambient","judge_not_confident",confidence=confidence,judged=True,judge_seconds=elapsed,**judge_evidence)
             if route=="followup" and verdict.get('anchor_id') not in anchors:
                 return self._result("ambient","missing_or_invalid_ai_anchor",judged=True,judge_seconds=elapsed,**judge_evidence)
-            if route=="addressed" and not (has_alias or anchor or image_turn or capability_request or recent_addressing):
+            if route=="addressed" and observations is None and not (has_alias or anchor or image_turn or capability_request or recent_addressing):
                 return self._result("ambient","no_addressing_evidence",judged=True,judge_seconds=elapsed,**judge_evidence)
             ctx.fast_times[sender] = now
             incoming_row['directed_to_bot']=True

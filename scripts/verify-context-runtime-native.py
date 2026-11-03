@@ -1,6 +1,7 @@
 """Synthetic native runtime and latency checks. No network/model/QQ operations."""
 import asyncio
 import importlib
+import importlib.util
 import json
 import gzip
 from pathlib import Path
@@ -70,7 +71,7 @@ async def run():
                     self.set_extra('sent_texts',sent);return None
             e=Event(text,raw,PlatformMetadata(name='aiocqhttp',description='synthetic',id='fixture'),'G')
             e.plugins_name=['astrbot_plugin_qq_persona_models'];e.set_extra('user_policy_effective_persona_id',persona)
-            e.set_extra('user_policy_decision',SimpleNamespace(is_blocked=False,memory_isolation=True,identity=SimpleNamespace(is_private=False,group_id='fixture:G',user_id=sender)))
+            e.set_extra('user_policy_decision',SimpleNamespace(is_blocked=False,memory_isolation=True,persona_id=persona,identity=SimpleNamespace(is_private=False,platform='aiocqhttp',group_id='G',user_id=sender)))
             e.set_extra('qq_diagnostic',True)
             return e
         def picture(name,color):
@@ -80,6 +81,129 @@ async def run():
         def request(e):
             async def noop(*a,**kw):return 'fixture'
             return ProviderRequest(prompt=e.message_str,func_tool=ToolSet(tools=[FunctionTool(name='view_context_images',description='fixture',parameters={'type':'object','properties':{'attachment_ids':{'type':'array','items':{'type':'string'}}}},handler=noop)]))
+        # Reproduce the real cold-start order: user plugins load before astrbot.
+        cold_archive=AttachmentContext(probe,root/'cold'/'archive',{'enabled':True})
+        cold=Runtime(probe,cold_archive,Path('/candidate'))
+        cold.state_path.write_text(json.dumps({'mode':'contextaware'}),encoding='utf-8')
+        registered.pop('astrbot')
+        try:
+            await cold.initialize()
+            check('cold_start_keeps_plugin_loadable_until_native_plugin_arrives',cold.startup_pending and cold.coordinator.active=='builtin')
+            check('cold_start_exposes_dependency_reason',bool(cold.status()['startup_issue']) and cold.status()['requested_backend']=='contextaware')
+            early=event('arrived before dependency')
+            try:await cold.capture(early);blocked=False
+            except RuntimeError:blocked=True
+            check('cold_start_does_not_dispatch_under_wrong_backend',blocked and early.is_stopped() and cold_archive.store.stats()['messages']==0)
+            registered['astrbot']=builtin
+            await cold.refresh_dependencies()
+            check('native_plugin_loaded_restores_saved_contextaware',cold.coordinator.active=='contextaware' and not cold.startup_pending and not cold.startup_issue)
+            first_wrapper=builtin.star_cls.group_chat_context.on_req_llm
+            await cold.refresh_dependencies();await cold.refresh_dependencies()
+            check('dependency_refresh_does_not_stack_native_wrappers',builtin.star_cls.group_chat_context.on_req_llm is first_wrapper)
+            check('deferred_restore_does_not_rewrite_saved_choice',json.loads(cold.state_path.read_text())=={'mode':'contextaware'})
+        finally:
+            registered['astrbot']=builtin
+            await cold.close()
+        check('cold_start_close_restores_native_owner',builtin.star_cls.group_chat_context.on_req_llm is native_group)
+        missing_archive=AttachmentContext(probe,root/'missing-source'/'archive',{'enabled':True})
+        missing=Runtime(probe,missing_archive,root/'not-present')
+        missing.state_path.write_text(json.dumps({'mode':'contextaware'}),encoding='utf-8')
+        try:
+            await missing.initialize()
+            check('missing_candidate_source_keeps_recovery_ui_available',missing.startup_pending and not missing.status()['choices'][1]['available'])
+            await missing.switch('builtin')
+            check('explicit_local_choice_clears_pending_and_persists',not missing.startup_pending and json.loads(missing.state_path.read_text())=={'mode':'builtin'})
+        finally:await missing.close()
+        # Failing initialization/unload must still restore every adapter.
+        partial=object.__new__(Main);restored=[]
+        async def failing_init():raise ValueError('synthetic init failure')
+        async def failing_close():raise RuntimeError('synthetic dependency cleanup failure')
+        partial._initialize=failing_init;partial.attachments=SimpleNamespace(close=failing_close)
+        for name,method in (('image_execution_guard','restore'),('image_batch_adapter','close'),('image_timeout_adapter','close'),('image_response_adapter','restore'),('model_activity','restore'),('image_upload_adapter','restore'),('image_quote_adapter','restore'),('group_permission_adapter','restore')):
+            setattr(partial,name,SimpleNamespace(**{method:lambda n=name:restored.append(n)}))
+        partial.history_job=asyncio.create_task(asyncio.Event().wait())
+        try:await partial.initialize();failed=False
+        except ValueError:failed=True
+        check('failed_initialization_restores_all_other_adapters',failed and len(restored)==8 and partial.history_job.cancelled())
+        # Reloaded logging modules must not multiply one actual provider call.
+        log_module=importlib.import_module('runtime_fixture.model_logging')
+        first_logger=log_module.ModelActivityLogger({'enabled':True})
+        log_spec=importlib.util.spec_from_file_location('runtime_fixture.reloaded_model_logging',code/'model_logging.py')
+        reloaded_logger_module=importlib.util.module_from_spec(log_spec);log_spec.loader.exec_module(reloaded_logger_module)
+        second_logger=reloaded_logger_module.ModelActivityLogger({'enabled':True})
+        provider_calls=[]
+        class LocalProvider:
+            provider_config={'id':'synthetic','model':'synthetic'}
+            def get_model(self):return 'synthetic'
+            async def text_chat(self,**kwargs):provider_calls.append(True);return SimpleNamespace(role='assistant',tools_call_name=[],usage=None)
+        original_method=LocalProvider.text_chat
+        first_logger.instrument(LocalProvider,'text_chat','text');second_logger.instrument(LocalProvider,'text_chat','text')
+        try:
+            await LocalProvider().text_chat(prompt='fixture')
+            check('logging_reload_has_one_record_per_actual_call',len(provider_calls)==1 and first_logger.counts['started']==0 and second_logger.counts['started']==1)
+            first_logger.restore()
+            check('old_logger_cleanup_does_not_remove_new_owner',getattr(LocalProvider.text_chat,'_qq_model_activity_owner',None) is second_logger)
+        finally:first_logger.restore();second_logger.restore()
+        check('logging_reload_restores_original_method',LocalProvider.text_chat is original_method)
+        # Named platform-message recovery restores missed inputs, without a
+        # user quote, model replay, QQ send, or resetting the source timestamp.
+        repair_module=importlib.import_module('runtime_fixture.group_context_repair')
+        repair_archive=AttachmentContext(probe,root/'repair'/'archive',{'enabled':True})
+        repair_runtime=Runtime(probe,repair_archive,Path('/candidate'))
+        saved_policy=registered['astrbot_plugin_user_policy']
+        saved_platform_manager=getattr(context,'platform_manager',None)
+        saved_decoder=repair_module.native_event
+        async def decode_fixture(platform,message,group):
+            e=event('image fixture' if message['message_id']==101 else '请解读之前的图片',front if message['message_id']==101 else None)
+            e.message_obj.message_id=str(message['message_id'])
+            return e
+        source_time=time.time()-600
+        messages={101:{'message_id':101,'group_id':'G','time':source_time},102:{'message_id':102,'group_id':'G','time':source_time+10}}
+        reads=[]
+        class RepairBot:
+            async def call_action(self,action,**kwargs):
+                reads.append(action)
+                if action=='get_login_info':return {'user_id':2354912009}
+                if action=='get_msg':return dict(messages[kwargs['message_id']])
+                raise AssertionError('Only read actions permitted')
+        fake_platform=SimpleNamespace(meta=lambda:SimpleNamespace(id='qq-snowluma'),bot=RepairBot())
+        context.platform_manager=SimpleNamespace(get_insts=lambda:[fake_platform])
+        registered['astrbot_plugin_user_policy']=SimpleNamespace(star_cls=SimpleNamespace(
+            memory_isolation=saved_policy.star_cls.memory_isolation,
+            _decision_for_event=lambda e:e.get_extra('user_policy_decision'),
+            matcher=SimpleNamespace(check_plugin_access=lambda *a:SimpleNamespace(allowed=True))))
+        repair_module.native_event=decode_fixture;probe.attachments=repair_runtime
+        try:
+            messages[102]['group_id']='foreign'
+            try:await repair_module.restore_group_messages(probe,{'group_id':'G','message_ids':[101,102]});denied=False
+            except ValueError:denied=True
+            check('repair_foreign_source_rejected_before_any_writes',denied and repair_archive.store.stats()['messages']==0)
+            messages[102]['group_id']='G'
+            result=await repair_module.restore_group_messages(probe,{'group_id':'G','message_ids':[101,102]})
+            check('named_recovery_without_user_quote_succeeds',result['passed'] and sum(r.get('ready_images',0) for r in result['messages'])==1)
+            check('named_recovery_never_sends_or_calls_model',set(reads)=={'get_login_info','get_msg'} and result['model_calls']==result['qq_messages_sent']==0)
+            again=await repair_module.restore_group_messages(probe,{'group_id':'G','message_ids':[101,102]})
+            check('named_recovery_is_idempotent',all(r.get('already_present') for r in again['messages']) and repair_archive.store.stats()['messages']==2)
+            q=event('请解读之前的图片');rq=request(q);await repair_archive.prepare(q,rq)
+            snap=q.get_extra('qq_attachment_snapshot')
+            original=repair_archive.store.messages(snap,message_id='101')[0]
+            check('named_recovery_preserves_original_message_time',original['received_at']==source_time)
+            aid=next(r['id'] for r in snap['catalog'] if r['message_id']=='101')
+            viewed=await repair_archive.view_images(q,[aid])
+            import hashlib
+            original_hash=hashlib.sha256(front.read_bytes()).hexdigest()
+            check('named_recovery_read_tool_returns_original_source_and_image',any(c.type=='image' for c in viewed.content) and any(c.type=='text' and original_hash in c.text for c in viewed.content) and repair_archive.store.resolve(snap,[aid])[0]['digest']==original_hash)
+            await repair_runtime.initialize();await repair_runtime.switch('contextaware')
+            followup=event('解读之前的图片');followup_request=request(followup)
+            await repair_runtime.prepare(followup,followup_request)
+            recovered=next(r for r in repair_runtime.candidate.catalog(followup) if r['message_id']=='101')
+            recovered_view=await repair_runtime.view_images(followup,[recovered['id']])
+            check('named_recovery_appears_in_contextaware_next_request_without_quote',any(c.type=='image' for c in recovered_view.content) and '101' in followup_request.system_prompt)
+        finally:
+            repair_module.native_event=saved_decoder;probe.attachments=runtime
+            registered['astrbot_plugin_user_policy']=saved_policy
+            context.platform_manager=saved_platform_manager
+            await repair_runtime.close()
         await runtime.initialize();runtime.start();runtime.install_outgoing()
         try:
             check('candidate_available',runtime.status()['choices'][1]['available'])
@@ -96,6 +220,20 @@ async def run():
             waiting.cancel();maintenance.cancel();await asyncio.gather(waiting,maintenance,return_exceptions=True)
             registered.pop('astrbot_plugin_self_initiated_reply')
             check('no_upstream_tools_registered_globally',len(llm_tools.func_list)==before)
+            for alias in ('G','fixture:G','fixture:GroupMessage:G'):
+                scope_event=event('alias scope fixture')
+                scope_event.get_extra('user_policy_decision').identity.group_id=alias
+                owner=probe.attachment_identity(scope_event);history_owner=probe.chat_history_identity(scope_event)
+                check('native_alias_has_attachment_and_history_scope_'+alias,bool(owner) and bool(history_owner) and owner['scope']==history_owner['scope'])
+            unscoped=event('scope denied fixture')
+            unscoped.get_extra('user_policy_decision').identity.group_id='foreign:G'
+            unscoped_req=request(unscoped)
+            check('foreign_policy_group_does_not_gain_archive_access',probe.attachment_identity(unscoped) is None)
+            runtime.filter_tools(unscoped,unscoped_req)
+            check('unauthorized_scope_still_loses_history_image_tools','view_context_images' not in unscoped_req.func_tool.names())
+            await builtin.star_cls.group_chat_context.on_req_llm(unscoped,unscoped_req)
+            check('ineligible_scope_retains_native_group_history',len(native_calls)==1)
+            native_calls.clear()
             upload=event('正面参考',front);await runtime.capture(upload);await release(upload)
             upload2=event('侧面补充',side);await runtime.capture(upload2);await release(upload2)
             q=event('结合之前的参考修改');rq=request(q);await runtime.prepare(q,rq)
@@ -103,9 +241,18 @@ async def run():
             check('persistent_and_active_image_counts_match',len(catalog)==2 and archive.store.stats()['attachments']==2)
             check('current_text_does_not_guess_historical_image',not rq.image_urls)
             check('facts_and_catalog_have_source_ids','sender_id' in rq.system_prompt and all(r['id'] in rq.system_prompt for r in catalog))
+            catalog_stats=q.get_extra('qq_context_catalog_stats')
+            check('catalog_trace_counts_available_history_separately_from_pixels',catalog_stats['image_candidates']==catalog_stats['history_images']==2 and catalog_stats['current_images']==0 and set(catalog_stats['source_message_ids'])=={upload.message_obj.message_id,upload2.message_obj.message_id})
+            contract=importlib.import_module('runtime_fixture.response_task_contract')
+            before_prompt=rq.prompt;before_history=list(rq.contexts);before_tools=rq.func_tool
+            q.set_extra('self_initiated_reply',True)
+            contract.apply_response_task_contract(q,rq);once=rq.system_prompt
+            contract.apply_response_task_contract(q,rq)
+            check('proactive_task_contract_preserves_user_history_and_tool_permissions',rq.prompt==before_prompt and rq.contexts==before_history and rq.func_tool is before_tools and rq.system_prompt==once and contract.MARKER in once)
             await builtin.star_cls.group_chat_context.on_req_llm(q,rq)
             check('native_group_injection_skipped_in_candidate_mode',not native_calls)
             viewed=await runtime.view_images(q,[r['id'] for r in catalog]);check('view_tool_returns_two_images',sum(c.type=='image' for c in viewed.content)==2)
+            check('image_read_trace_only_records_returned_image_sources',set(q.get_extra('qq_context_images_viewed'))=={r['id'] for r in catalog} and any(row.get('returned_images')==2 for row in logs))
             evicted=catalog[0]['id']
             runtime.candidate.plugin._image_index._remove(evicted)
             state=runtime.restorer.maps[runtime.candidate.scoped(q).scope]
@@ -322,6 +469,14 @@ async def run():
             from runtime_fixture.image_batch_checks import verify_image_batches
             batch_pure=await verify_image_batches()
             for name,value in batch_pure['checks'].items():check('batch_budget_'+name,value)
+            evidence_spec=util.spec_from_file_location('evidence_native','/workspace/scripts/verify-task-evidence-native.py')
+            evidence_fixture=util.module_from_spec(evidence_spec);evidence_spec.loader.exec_module(evidence_fixture)
+            evidence_result=await evidence_fixture.verify_guard(probe,runtime,event,request,release,root)
+            for name,value in evidence_result['checks'].items():check('evidence_'+name,value)
+            delivery_spec=util.spec_from_file_location('delivery_native','/workspace/scripts/verify-reply-delivery-native.py')
+            delivery_fixture=util.module_from_spec(delivery_spec);delivery_spec.loader.exec_module(delivery_fixture)
+            delivery_result=await delivery_fixture.verify_delivery(probe,event,release)
+            for name,value in delivery_result['checks'].items():check('delivery_'+name,value)
             probes={}
             for mode in ('builtin','contextaware'):
                 await runtime.switch(mode)
@@ -344,12 +499,14 @@ async def run():
                 for i in range(40):
                     e=event('普通文字问候 '+str(i));r=request(e);start=time.perf_counter()
                     await runtime.capture(e);await runtime.prepare(e,r)
+                    from runtime_fixture.task_evidence import TaskEvidenceGuard
+                    TaskEvidenceGuard(probe).attach(e,r)
                     samples.append((time.perf_counter()-start)*1000);await release(e)
                 measurements[mode]={'samples':40,'first_prepare_ms':round(samples[0],3),'max_ms':round(max(samples),3),'p50_ms':round(statistics.median(samples),3),'p95_ms':round(sorted(samples)[37],3)}
             delta=measurements['contextaware']['p95_ms']-measurements['builtin']['p95_ms']
             check('candidate_added_local_p95_under_200ms',delta<200)
             check('no_extra_caption_summary_or_model_calls',not runtime.candidate.plugin._image_caption_enabled and runtime.candidate.plugin._topic is None and runtime.metrics['model_calls_added']==0)
-            print('RUNTIME_REPORT='+json.dumps({'passed':all(checks.values()),'checks':checks,'measurements':measurements,'batch_native':{k:v for k,v in batch_result.items() if k!='checks'},'retained_image_bytes':retained,'delta_p95_ms':round(delta,3),'model_calls':0,'image_generations':0,'qq_messages_sent':0,'model_probes':probes},ensure_ascii=False),flush=True)
+            print('RUNTIME_REPORT='+json.dumps({'passed':all(checks.values()),'checks':checks,'measurements':measurements,'task_evidence':evidence_result,'batch_native':{k:v for k,v in batch_result.items() if k!='checks'},'retained_image_bytes':retained,'delta_p95_ms':round(delta,3),'model_calls':0,'image_generations':0,'qq_messages_sent':0,'model_probes':probes},ensure_ascii=False),flush=True)
         finally:
             await runtime.close()
 

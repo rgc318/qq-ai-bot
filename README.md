@@ -2,7 +2,7 @@
 
 方案：**SnowLuma + AstrBot 官方版 + 自有模型 API**。
 
-当前已通过 **Ubuntu WSL2 的 Docker Compose** 部署，本地扩展为 **1.11.4**。实际状态与验收范围见 [STATUS.md](STATUS.md)；操作入口是 [compose.yaml](compose.yaml) 和 [Compose 部署说明](docs/docker-compose.md)，原生 Windows 安装说明保留为备用。
+当前已通过 **Ubuntu WSL2 的 Docker Compose** 部署，本地扩展为 **1.14.0**。统一近期群聊事实、直接多模态预览和独立请求记录，详见[统一上下文架构](docs/shared-context-architecture-2026-11-01.md)。实际状态与验收范围见 [STATUS.md](STATUS.md)；操作入口是 [compose.yaml](compose.yaml) 和 [Compose 部署说明](docs/docker-compose.md)，原生 Windows 安装说明保留为备用。
 
 ```text
 QQ ↔ SnowLuma ↔ OneBot v11 反向 WebSocket ↔ AstrBot ↔ 模型 API
@@ -10,7 +10,17 @@ QQ ↔ SnowLuma ↔ OneBot v11 反向 WebSocket ↔ AstrBot ↔ 模型 API
 
 ## 当前部署入口
 
-人格切换、模型绑定、自动接话与生图用法见 [人格与工具说明](docs/personas-and-tools.md)。当前默认“大肥鱼 + DeepSeek 1017”，可切换为“ChatGPT龙娘 + 6.1 sol / low”。
+当前配置、版本和验收摘要见 [部署状态](STATUS.md)，近期改动与验证索引见 [1.14.0 发布整理](docs/release-1.14.0-2026-11-03.md)。历史记录单独保存在 [部署历史](docs/deployment-history-through-2026-11-02.md)，不作为当前模型绑定依据。
+
+已启用首段立即发送，后续气泡继续使用原生分段间隔；可在本地插件配置中关闭，见[首段发送设置](docs/first-segment-delivery-2026-11-02.md)。
+
+当前判断模型为官方Pro，主聊天大肥鱼为官方Flash；两者耗时分开记录，见[官方判断模型试用](docs/official-judge-trial-2026-11-01.md)。
+
+大肥鱼已开始试用 DeepSeek 官方 1017 路线，原硅基提供商保留作回退；对照数据与切换位置见 [官方 DeepSeek 试用](docs/deepseek-official-trial-2026-11-01.md)。
+
+近期资料直传、历史按需回看、资料可见状态、一次任务纠正及延迟边界，见 [1.13.0 完成检查说明](docs/task-evidence-and-correction-2026-11-01.md)。正常聊天不固定增加审核模型调用，可在插件配置中关闭完成检查。
+
+人格切换、模型绑定、自动接话与生图用法见 [人格与工具说明](docs/personas-and-tools.md)。当前默认“大肥鱼 + DeepSeek 1017”，可切换为“ChatGPT龙娘”；实际模型以后台当前绑定为准。插件配置中的“人格与聊天模型绑定”可直接选择已有人格和已配置的聊天模型，无需手写 Provider ID。
 
 点名、跨成员追问、普通群聊如何区别处理，见 [回复条件](docs/reply-conditions.md)。
 
@@ -59,6 +69,6 @@ QQ ↔ SnowLuma ↔ OneBot v11 反向 WebSocket ↔ AstrBot ↔ 模型 API
 
 `deployment.local.json` **不会被 SnowLuma 或 AstrBot 自动读取**，引导脚本将其中的部署约定转换为 AstrBot 原生配置。API Key、OneBot Token 和后台密码不写进示例、日志或资料文档。为兼容 v4.29.1 的模型列表接口，模型源保存实际 API Key，位于 AstrBot 数据卷中。更换 Key 时需同时同步模型源与 Compose 环境，操作见 Compose 部署说明。
 
-标准模型 API 接入不需要 DSH、qq-bridge 或 Codex 桥接。后续需要业务操作时，再为 AstrBot 添加相应插件或 MCP 工具。
+标准模型 API 接入不需要 DSH、qq-bridge 或 Codex 桥接。后续需要业务操作时，再为 AstrBot 添加相应插件或 MCP 工具。目前尚未安装禁言、撤回等 AI 群管理插件；SnowLuma 已有的 QQ 接口不等于模型已获群管工具和权限。
 
 注意：`.gitignore` 只避免 Git 误提交，不会加密或限制本地文件访问。两个项目均有非商业使用限制；本次使用 SnowLuma 官方文档公布的预构建 Docker 镜像，没有重新打包原生组件。具体资料见 [资料来源](docs/sources.md)。

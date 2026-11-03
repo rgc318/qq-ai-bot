@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -58,16 +59,18 @@ class AttachmentStore:
             db.execute('UPDATE scopes SET epoch=epoch+1 WHERE scope=?',(scope,))
         return self.epoch(scope)
 
-    def record(self,scope,umo,message_id,sender,name,text,parts,kind='user',parents=(),expected_epoch=None):
+    def record(self,scope,umo,message_id,sender,name,text,parts,kind='user',parents=(),expected_epoch=None,*,received_at=None):
         """One immutable event per received platform ID; quote origin stays explicit."""
         epoch=self.epoch(scope)
+        received=self.clock() if received_at is None else float(received_at)
+        if not math.isfinite(received) or received<=0 or received>self.clock()+60:raise ValueError('原消息时间无效')
         if expected_epoch is not None and epoch!=expected_epoch:raise ValueError('会话已清空，拒绝迟到的附件登记')
         with self.db() as db:
             if self.epoch(scope)!=epoch:raise ValueError('会话范围已变更')
             db.execute('UPDATE event_clock SET value=value+1 WHERE singleton=1')
             allocated=db.execute('SELECT value FROM event_clock WHERE singleton=1').fetchone()[0]
             db.execute('INSERT OR IGNORE INTO events(seq,scope,epoch,message_id,umo,sender,name,text,received,parts,kind) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                       (allocated,scope,epoch,str(message_id),umo,sender,name[:80],text[:12000],self.clock(),'[]',kind))
+                       (allocated,scope,epoch,str(message_id),umo,sender,name[:80],text[:12000],received,'[]',kind))
             seq=db.execute('SELECT seq FROM events WHERE scope=? AND epoch=? AND message_id=?',(scope,epoch,str(message_id))).fetchone()[0]
             public=[];ids=[]
             for i,part in enumerate(parts):
@@ -76,7 +79,7 @@ class AttachmentStore:
                     ordinal=int(part.get('ordinal',i));key=f'{scope}|{epoch}|{message_id}|{origin}|{ordinal}|{part["type"]}'
                     asset_id='a_'+hashlib.sha256(key.encode()).hexdigest()[:24]
                     db.execute('''INSERT OR IGNORE INTO assets(id,scope,epoch,seq,message_id,sender,name,ordinal,kind,filename,source,created,expires,parents)
-                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(asset_id,scope,epoch,seq,origin,str(part.get('sender') or sender),str(part.get('sender_name') or name)[:80],ordinal,part['type'],str(part.get('filename') or '')[:160],json.dumps(part.get('source',{})),self.clock(),self.clock()+float(self.settings.get('media_ttl_seconds',86400)),json.dumps(list(parents))))
+                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(asset_id,scope,epoch,seq,origin,str(part.get('sender') or sender),str(part.get('sender_name') or name)[:80],ordinal,part['type'],str(part.get('filename') or '')[:160],json.dumps(part.get('source',{})),received,received+float(self.settings.get('media_ttl_seconds',86400)),json.dumps(list(parents))))
                     ids.append(asset_id);public.append({'type':part['type'],'attachment_id':asset_id,'origin_message':origin,'ordinal':ordinal})
                 else:public.append({k:v for k,v in part.items() if k in ('type','message_id','user_id','text')})
             db.execute('UPDATE events SET parts=? WHERE seq=?',(json.dumps(public,ensure_ascii=False),seq))
@@ -163,6 +166,20 @@ class AttachmentStore:
             if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest()!=row['digest']:raise ValueError('附件完整性检查失败')
             result.append({**row,'path':str(path)})
         return result
+
+    def recent(self,snapshot,limit=16):
+        """One bounded fact view, ordered by original event time, not repair time."""
+        if self.epoch(snapshot['scope'])!=snapshot['epoch']:raise ValueError('本轮会话已失效')
+        with self.db() as db:
+            rows=db.execute('SELECT * FROM events WHERE scope=? AND epoch=? AND seq<=? ORDER BY received DESC,seq DESC LIMIT ?',
+                (snapshot['scope'],snapshot['epoch'],snapshot['seq'],max(1,min(int(limit),40)))).fetchall()
+            assets=db.execute('SELECT * FROM assets WHERE scope=? AND epoch=? AND seq<=? AND seq IN ('+','.join('?' for _ in rows)+')',
+                (snapshot['scope'],snapshot['epoch'],snapshot['seq'],*(row['seq'] for row in rows))).fetchall() if rows else []
+        grouped={}
+        for asset in assets:grouped.setdefault(asset['seq'],[]).append(self.public(asset))
+        return [{'message_id':row['message_id'],'sender':row['sender'],'name':row['name'],'text':row['text'],
+                 'received_at':row['received'],'parts':json.loads(row['parts']),'attachments':sorted(grouped.get(row['seq'],[]),key=lambda a:a['position']),
+                 'kind':row['kind']} for row in reversed(rows)]
 
     def messages(self,snapshot,message_id='',query='',limit=3):
         if self.epoch(snapshot['scope'])!=snapshot['epoch']:raise ValueError('本轮会话已失效')

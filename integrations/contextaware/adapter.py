@@ -96,6 +96,7 @@ class CandidateBackend:
         # The managed loader suppresses global registration; hooks are explicit.
         self.plugin = ca_module.Main(self.routing_context, config)
         self.plugin._scene_generator = FactScene()
+        self.shared_context = bool(config.get('shared_fact_scene'))
         self.module = ca_module
         self.closed = False
 
@@ -123,7 +124,12 @@ class CandidateBackend:
     async def prepare(self, event, request):
         view = self.scoped(event)
         view.set_extra('provider_request', request)
-        await self.plugin.on_llm_request(view, request)
+        if self.shared_context:
+            # Use the versioned public image API to freeze the source directory.
+            # The facade owns the one fact/preview presentation; do not invoke
+            # upstream's independent scene writer or automatic image selector.
+            self.plugin.get_image_catalog(view)
+        else:await self.plugin.on_llm_request(view, request)
 
     def catalog(self, event):
         return self.plugin.get_image_catalog(self.scoped(event))

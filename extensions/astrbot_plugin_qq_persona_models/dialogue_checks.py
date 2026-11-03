@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 from .reply_routing import ReplyRouter
+from .persona_bindings import binding_map
 
 
 async def verify_dialogue_cases(plugin,call_model=False,only=None):
@@ -60,7 +61,7 @@ async def verify_dialogue_cases(plugin,call_model=False,only=None):
             checks[case['name']+'_snapshot_attached']=bool(event.get_extra('qq_dialogue_context_attached'))
             if case['name']=='multi_member_planning':checks['all_three_speakers_preserved']={'test-A','test-B','test-C'}.issubset({r['speaker_id'] for r in rows})
             if call_model:
-                provider=plugin.context.get_provider_by_id(plugin.config['bindings'][decision.persona_id])
+                provider=plugin.context.get_provider_by_id(binding_map(plugin.config)[decision.persona_id])
                 started=time.monotonic()
                 response=await provider.text_chat(prompt=req.prompt,system_prompt=req.system_prompt,contexts=req.contexts,func_tool=None)
                 model_calls+=1;text=response.completion_text or ''

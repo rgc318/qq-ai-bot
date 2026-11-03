@@ -27,7 +27,7 @@ def plan_history(contexts,text,settings):
                     parts.append(part)
                     kept_images+=1
                 else:
-                    parts.append({'type':'text','text':'[此前附带的图片本轮未重传；需要查看时请引用或重发原图。]'})
+                    parts.append({'type':'text','text':'[历史图像已从正式对话副本省略；先查看本轮近期视觉资料，缺少时按原消息来源使用历史/读图工具。]'})
                     removed_images+=1
             else:
                 parts.append(part)

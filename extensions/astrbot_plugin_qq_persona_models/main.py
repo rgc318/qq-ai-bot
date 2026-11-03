@@ -33,13 +33,20 @@ from .image_task_contract import validate_task,consume_task,complete_task
 from .image_response_adapter import ImageResponseAdapter
 from .image_batch import ImageBatchAdapter,validate_batch
 from .image_batch_timeout import ImageTimeoutAdapter
+from .persona_bindings import binding_map,migrate_bindings
+from .group_context_identity import matches_group_identity
+from .response_task_contract import apply_response_task_contract
+from .task_evidence import TaskEvidenceGuard, observe_result
+from .reply_delivery import ReplyDeliveryAdapter
 
 
-@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.11.4")
+@register("astrbot_plugin_qq_persona_models", "local-deployment", "QQ 人格模型与回复条件", "1.14.0")
 class PersonaModelBindings(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        if migrate_bindings(config):
+            logger.info('[QQ人格模型] 旧版映射已迁移为人格和聊天模型选择条目，原有绑定保留。')
         self.router = ReplyRouter(dict(config.get("reply_conditions", {})), self.judge_reply)
         follow=config.get('contextual_image_followup',{})
         self.router.settings.update(image_context_enabled=follow.get('enabled',True),image_followup_window_seconds=follow.get('window_seconds',86400),image_followup_fallback=follow.get('fallback_to_main',True))
@@ -47,9 +54,12 @@ class PersonaModelBindings(Star):
         self.image_quote_adapter=ImageQuoteAdapter(self.scoped_group)
         self.group_permission_adapter=GroupPermissionAdapter(lambda:self.router.settings.get('allowed_groups',[]))
         self.model_activity=ModelActivityLogger(dict(config.get('model_logging',{})))
+        self.model_activity.request_outcome_observer=self.record_request_outcome
         self.image_execution_guard=ImageExecutionGuard()
         self.image_failure_policy=ImageFailurePolicy()
         self.image_response_adapter=ImageResponseAdapter()
+        self.task_evidence_guard=TaskEvidenceGuard(self)
+        self.reply_delivery_adapter=ReplyDeliveryAdapter(self)
         self.image_batch_adapter=ImageBatchAdapter(self)
         self.image_timeout_adapter=ImageTimeoutAdapter()
         self.chat_history_store=None
@@ -57,7 +67,24 @@ class PersonaModelBindings(Star):
         self.history_bootstrap={}
         self.attachments=None
 
+    def record_request_outcome(self,meta,state):
+        group=str(meta.get('group') or '');mid=str(meta.get('message') or '')
+        if group not in self.router.settings.get('allowed_groups',[]) or not mid:return
+        ctx=self.router.groups.get(group)
+        if ctx and meta.get('persona') and not ctx.scope.endswith('|'+str(meta['persona'])):
+            ctx=next((c for (g,_),c in self.router.scoped_groups.items() if g==group and c.scope.endswith('|'+str(meta['persona'])) and 'request:'+mid in c.tasks),None)
+        if ctx:
+            self.router.update_request(group,mid,scope=ctx.scope,status='failed' if state=='error' else 'cancelled',error_type=meta.get('error_type',''))
+            self.save_context()
+
     async def initialize(self):
+        try:
+            await self._initialize()
+        except BaseException:
+            await self.terminate()
+            raise
+
+    async def _initialize(self):
         self.image_upload_adapter.install(self.context)
         self.image_quote_adapter.install(self.context)
         self.group_permission_adapter.install(self.context)
@@ -65,6 +92,8 @@ class PersonaModelBindings(Star):
         self.image_batch_adapter.install(self.context)
         self.image_timeout_adapter.install(self.context)
         self.image_response_adapter.install()
+        self.task_evidence_guard.install()
+        self.reply_delivery_adapter.install()
         self.cache_path=StarTools.get_data_dir('astrbot_plugin_qq_persona_models')/'reply_context.json'
         archive=await asyncio.to_thread(AttachmentContext,self,self.cache_path.parent/'multimodal',dict(self.config.get('multimodal_context',{})))
         from .context_runtime import ContextRuntime
@@ -95,6 +124,16 @@ class PersonaModelBindings(Star):
         self.context.register_web_api('/astrbot_plugin_qq_persona_models/context_backend/status',self.context_backend_status,['GET'],'页面查看上下文后端状态')
         self.context.register_web_api('/astrbot_plugin_qq_persona_models/context_backend/switch',self.switch_context_backend,['POST'],'页面空闲切换上下文后端')
         self.context.register_web_api('/qq_persona_models/image_batch/status',self.image_batch_status,['GET'],'查看多图上限和适配器状态，不调用模型')
+        self.context.register_web_api('/qq_persona_models/context_backend/restore_messages',self.restore_context_messages,['POST'],'管理员按明确消息ID恢复允许群的原消息，仅补本地档案，不调用模型或发送QQ')
+
+    async def restore_context_messages(self):
+        from quart import jsonify,request
+        from .group_context_repair import restore_group_messages
+        payload=await request.get_json(silent=True)
+        if not isinstance(payload,dict):return jsonify({'status':'error','message':'请求格式无效'}),400
+        try:return jsonify({'status':'ok','data':await restore_group_messages(self,payload)})
+        except ValueError as exc:return jsonify({'status':'error','message':str(exc)}),400
+        except Exception as exc:return jsonify({'status':'error','message':'原消息恢复未完成：'+type(exc).__name__}),503
 
     async def image_batch_status(self):
         from quart import jsonify
@@ -119,22 +158,28 @@ class PersonaModelBindings(Star):
         self.model_activity.install(self.context)
         if getattr(self,'image_batch_adapter',None):self.image_batch_adapter.install(self.context)
         if getattr(self,'image_timeout_adapter',None):self.image_timeout_adapter.install(self.context)
-        if getattr(self,'attachments',None):self.attachments.install_outgoing()
+        if getattr(self,'attachments',None):
+            self.attachments.install_outgoing()
+            await self.attachments.refresh_dependencies()
         if getattr(metadata,'name','')=='astrbot_plugin_user_policy':
             self.start_history_bootstrap()
 
     async def terminate(self):
-        if getattr(self,'attachments',None):await self.attachments.close()
-        self.image_execution_guard.restore()
-        self.image_batch_adapter.close()
-        self.image_timeout_adapter.close()
-        self.image_response_adapter.restore()
-        self.model_activity.restore()
-        self.image_upload_adapter.restore()
-        self.image_quote_adapter.restore()
-        self.group_permission_adapter.restore()
+        # One failing dependency must not leave the other global wrappers and
+        # archive workers installed, which breaks subsequent reload attempts.
+        if getattr(self,'attachments',None):
+            try:await self.attachments.close()
+            except Exception as exc:logger.warning('[QQ插件卸载] 上下文清理失败，继续恢复其余适配器，类型=%s',type(exc).__name__)
+        for adapter,method in ((getattr(self,'reply_delivery_adapter',None),'restore'),(getattr(self,'task_evidence_guard',None),'restore'),(self.image_execution_guard,'restore'),(self.image_batch_adapter,'close'),
+                (self.image_timeout_adapter,'close'),(self.image_response_adapter,'restore'),
+                (self.model_activity,'restore'),(self.image_upload_adapter,'restore'),
+                (self.image_quote_adapter,'restore'),(self.group_permission_adapter,'restore')):
+            if adapter is None:continue
+            try:getattr(adapter,method)()
+            except Exception as exc:logger.warning('[QQ插件卸载] 适配器清理失败，类型=%s adapter=%s',type(exc).__name__,type(adapter).__name__)
         if self.history_job is not None and not self.history_job.done():
-            await self.history_job
+            self.history_job.cancel()
+            await asyncio.gather(self.history_job,return_exceptions=True)
 
     def start_history_bootstrap(self):
         if self.chat_history_store is None or self.history_job is not None and not self.history_job.done():return
@@ -158,9 +203,7 @@ class PersonaModelBindings(Star):
         decision=event.get_extra('user_policy_decision')
         if decision is None or getattr(decision,'is_blocked',True) or not getattr(decision,'memory_isolation',False):return None
         identity=decision.identity
-        instance,separator,target=str(event.unified_msg_origin).partition(':GroupMessage:')
-        if not separator or target!=str(event.get_group_id()):return None
-        if identity.is_private or str(identity.group_id)!=instance+':'+target or str(identity.user_id)!=str(event.get_sender_id()):return None
+        if not matches_group_identity(event,identity):return None
         persona=self.routing_persona(event)
         if not persona:return None
         policy=self.context.get_registered_star('astrbot_plugin_user_policy')
@@ -208,8 +251,8 @@ class PersonaModelBindings(Star):
         if permitted is not None and 'astrbot_plugin_qq_persona_models' not in permitted:return None
         decision=event.get_extra('user_policy_decision')
         if decision is None or getattr(decision,'is_blocked',True) or not getattr(decision,'memory_isolation',False):return None
-        identity=decision.identity;instance,sep,target=str(event.unified_msg_origin).partition(':GroupMessage:')
-        if not sep or target!=str(event.get_group_id()) or identity.is_private or str(identity.group_id)!=instance+':'+target or str(identity.user_id)!=str(event.get_sender_id()):return None
+        identity=decision.identity
+        if not matches_group_identity(event,identity):return None
         policy=self.context.get_registered_star('astrbot_plugin_user_policy');isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
         if isolation is None:return None
         namespace,kind=isolation._scope(decision);persona=self.routing_persona(event)
@@ -349,6 +392,9 @@ class PersonaModelBindings(Star):
     async def verify_memory_meme(self):
         from quart import jsonify, request
         payload=await request.get_json(silent=True) or {}
+        if payload.get('group_context_scope_only'):
+            from .group_context_scope_checks import verify_group_context_scopes
+            return jsonify({'status':'ok','data':verify_group_context_scopes(self)})
         if payload.get('image_batch_only'):
             from .image_batch_checks import verify_image_batches
             return jsonify({'status':'ok','data':await verify_image_batches()})
@@ -568,7 +614,7 @@ class PersonaModelBindings(Star):
         import asyncio
         try:
             persona_id=self.routing_persona(event)
-            provider_id=event.get_extra('selected_provider') or self.config.get('bindings',{}).get(persona_id)
+            provider_id=event.get_extra('selected_provider') or binding_map(self.config).get(persona_id)
             provider=self.context.get_provider_by_id(provider_id) if provider_id else await self.context.get_using_provider_async(umo=event.unified_msg_origin)
             persona=await self.context.persona_manager.get_persona(persona_id)
             system=(getattr(persona,'system_prompt','') or '')+'\n当前只写图片任务开始前的一句简短自然对白，使用本人的性格和语气，贴合这次要求，避免固定报到话术。只输出一句中文，最多60字，不带引号和标记。不声称已经完成，不保证用时，不解释模型/工具，不调用工具。\n'
@@ -616,10 +662,7 @@ class PersonaModelBindings(Star):
         isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
         namespace=isolation._scope(decision)[0] if isolation and decision else event.unified_msg_origin
         scope=namespace+'|'+persona
-        if ctx.scope and ctx.scope!=scope:
-            self.router.groups.pop(group,None)
-            ctx=self.router.context(group)
-        ctx.scope=scope
+        ctx=self.router.select_scope(group,scope)
         event.set_extra('qq_reply_scope',scope)
         try:
             await hydrate_history(self.context,self.router,event,persona)
@@ -629,23 +672,23 @@ class PersonaModelBindings(Star):
         from astrbot.api.message_components import At, AtAll, Reply, Plain
         components = event.get_messages()
         self_id = str(event.get_self_id())
-        targets_other = any((isinstance(x, At) and str(x.qq) != self_id) or isinstance(x, AtAll) or (isinstance(x, Reply) and str(x.sender_id) != self_id) for x in components)
+        # Quoting another member supplies task material; it does not by itself
+        # prove that member, rather than the bot, is the addressee.
+        targets_other = any((isinstance(x, At) and str(x.qq) != self_id) or isinstance(x, AtAll) for x in components)
         media=getattr(self,'attachments',None)
         indexed=bool(media and media.enabled() and media.identity(event))
         if indexed:await media.capture(event)
         upload=remember_upload(self,event,ctx,targets_other) if not indexed and self.router.settings.get('image_context_enabled',True) else None
-        only_at=bool(components) and any(isinstance(x,At) and str(x.qq)==self_id for x in components) and all(isinstance(x,At) or isinstance(x,Plain) and not x.text.strip() for x in components)
-        if only_at and not targets_other and not event.get_message_str().strip():
-            previous=self.router.unanswered_request(group,str(event.get_sender_id()))
-            text=('请接着处理我刚才这条未获回应的请求：\n'+previous) if previous else '我刚刚单独@了你，请简短回应并询问我需要什么帮助。'
-            event.message_str=text
-            event.message_obj.message.append(Plain(text=text))
-            event.set_extra('qq_mention_resumed',bool(previous))
-            if ctx.last_ai:
-                event.set_extra('qq_semantic_reference',ctx.last_ai)
+        observations=await media.compiler.facts(event) if indexed else None
+        current=next((r for r in observations or [] if r['message_id']==str(event.message_obj.message_id)),None)
+        metadata={'image_count':sum(a['type']=='image' for a in current['attachments']),
+                  'attachments':[{k:a[k] for k in ('id','type','message_id','state','position')} for a in current['attachments']],
+                  'reply_to':[{'message_id':p['message_id'],'sender_id':p.get('user_id','')} for p in current['parts'] if p.get('type')=='reply']} if current else None
+        from .request_context import ensure_call_request
+        ensure_call_request(event)
         trace=event_trace(event)
         with model_operation('reply_judge',{**trace,'configured_timeout_seconds':self.router.settings.get('judge_timeout_seconds',8)}):
-            verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other)
+            verdict = await self.router.decide(group, str(event.get_sender_id()), event.get_message_str(), name=event.get_sender_name(), message_id=str(getattr(event.message_obj,"message_id","") or ""), explicit=bool(event.is_at_or_wake_command), targets_other=targets_other,observations=observations,metadata=metadata,self_id=self_id)
         event.set_extra('qq_semantic_decision',verdict)
         if upload and ctx.messages and ctx.messages[-1].get('message_id')==str(getattr(event.message_obj,'message_id','')):
             row=ctx.messages[-1]
@@ -684,6 +727,9 @@ class PersonaModelBindings(Star):
             return
         await self.capture_chat_history(event,request)
         indexed=bool(media and await media.prepare(event,request))
+        if media and media.enabled() and not indexed:
+            activity=getattr(self,'model_activity',None)
+            if activity:activity.emit('context_backend_skipped',**event_trace(event),purpose='attachment_context',reason='scope_not_eligible' if not media.identity(event) else 'message_not_indexed')
         if indexed:
             await media.track_turn(event)
         elif self.router.settings.get('image_context_enabled',True):
@@ -738,7 +784,7 @@ class PersonaModelBindings(Star):
             if event.get_extra('qq_available_image_turn') and event.get_extra('qq_available_image_turn').get('reference_count'):
                 request.system_prompt+='\n本轮未自动重传旧图到当前附件。若你判断确实要继续修改上述同一张原图，调用图片工具时填写 use_previous_reference=true，由程序恢复原图传给绘图模型；若是独立新图则为false。这个选择参数不会传给图片API。\n'
         snapshot=event.get_extra('qq_dialogue_snapshot')
-        if self.config.get('conversation_context',{}).get('enabled',True) and snapshot and event.get_extra('qq_context_backend')!='contextaware':
+        if self.config.get('conversation_context',{}).get('enabled',True) and snapshot and not event.get_extra('qq_request_context_compiled') and event.get_extra('qq_context_backend')!='contextaware':
             decision=event.get_extra('user_policy_decision')
             policy=self.context.get_registered_star('astrbot_plugin_user_policy')
             isolation=getattr(getattr(policy,'star_cls',None),'memory_isolation',None)
@@ -749,23 +795,30 @@ class PersonaModelBindings(Star):
         # of its section. Restore it after every request customization.
         from astrbot.core.astr_main_agent_resources import TOOL_CALL_PROMPT
         restore_tool_response_contract(request,TOOL_CALL_PROMPT)
-        self.router.note_ai(group,"", request=event.get_message_str(),sender=str(event.get_sender_id()),pending=True)
+        apply_response_task_contract(event,request)
+        guard=getattr(self,'task_evidence_guard',None)
+        if guard:guard.attach(event,request)
+        self.router.note_ai(group,"", request=event.get_message_str(),sender=str(event.get_sender_id()),pending=True,message_id=str(event.message_obj.message_id))
         self.save_context()
         activity=getattr(self,'model_activity',None)
         if activity:
-            provider_id=event.get_extra('selected_provider') or self.config.get('bindings',{}).get(self.routing_persona(event))
+            provider_id=event.get_extra('selected_provider') or binding_map(self.config).get(self.routing_persona(event))
             provider=self.context.get_provider_by_id(provider_id) if provider_id else None
-            activity.emit('request_ready',**event_trace(event),purpose='main_reply',provider=provider_id,model=provider.get_model() if provider else 'unknown',context_messages=len(getattr(request,'contexts',None) or []),image_count=count_image_parts(getattr(request,'contexts',None),getattr(request,'image_urls',None),getattr(request,'extra_user_content_parts',None)),tool_count=len(request.func_tool.names()) if getattr(request,'func_tool',None) else 0,input_chars=len(request.system_prompt or '')+len(request.prompt or ''))
+            activity.emit('request_ready',**event_trace(event),purpose='main_reply',provider=provider_id,model=provider.get_model() if provider else 'unknown',context_messages=len(getattr(request,'contexts',None) or []),image_count=count_image_parts(getattr(request,'contexts',None),getattr(request,'image_urls',None),getattr(request,'extra_user_content_parts',None)),tool_count=len(request.func_tool.names()) if getattr(request,'func_tool',None) else 0,input_chars=len(request.system_prompt or '')+len(request.prompt or ''),history_image_candidates=(event.get_extra('qq_context_catalog_stats') or {}).get('history_images'),initial_history_images=len(event.get_extra('qq_initial_image_ids') or []),preview_bytes=(event.get_extra('qq_context_input_stats') or {}).get('preview_bytes',0),history_read_tools=sorted(set(request.func_tool.names()).intersection(TOOL_NAMES)) if getattr(request,'func_tool',None) else [],proactive=bool(event.get_extra('self_initiated_reply')))
 
     @filter.on_llm_response(priority=-1300)
     async def log_reply_completion(self,event: AstrMessageEvent,response):
         if not self.scoped_group(event):return
+        evidence=event.get_extra('qq_task_evidence')
+        if evidence:
+            self.router.update_request(self.scoped_group(event),str(event.message_obj.message_id),scope=event.get_extra('qq_reply_scope'),
+                task_status=evidence.get('task_status','unreported'),evidence_status=evidence.get('last_code') or ('checked' if evidence.get('declared') else 'unreported'))
         if self.router.settings.get('image_context_enabled',True):
             reply_finished(event,response)
             self.save_context()
         activity=getattr(self,'model_activity',None)
         if activity:
-            activity.emit('reply_done',**event_trace(event),purpose='main_reply',outcome='agent_finished',image_tool_calls=event.get_extra('qq_image_tools_started') or 0,seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3))
+            activity.emit('reply_done',**event_trace(event),purpose='main_reply',outcome='agent_finished',image_tool_calls=event.get_extra('qq_image_tools_started') or 0,context_images_viewed=len(event.get_extra('qq_context_images_viewed') or []),seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3))
 
     @filter.on_llm_tool_respond(priority=-1200)
     async def track_image_tool_result(self,event: AstrMessageEvent,tool,tool_args,tool_result):
@@ -782,6 +835,7 @@ class PersonaModelBindings(Star):
             self.record_dialogue_progress(event,'[图片参数校验未通过，本次未调用图片模型；此前图片任务状态未改变。]','image_tool_status')
             return
         status=result_state(tool_result)
+        self.router.update_request(self.scoped_group(event),str(event.message_obj.message_id),scope=event.get_extra('qq_reply_scope'),image_tool_status=status)
         if status=='sent' and (not report or all(i['status']=='sent' for i in report['items'])) and event.get_extra('qq_image_task_state') is not None:
             complete_task(event.get_extra('qq_image_task_state'))
         summaries={'sent':'[图片工具已报告成功下发图片；这是执行状态，不是图片内容或聊天原话。]',
@@ -796,6 +850,10 @@ class PersonaModelBindings(Star):
                 event.set_extra('qq_current_image_turn',turn)
             turn['status']=status
             self.save_context()
+
+    @filter.on_llm_tool_respond(priority=-1300)
+    async def record_tool_evidence(self,event: AstrMessageEvent,tool,tool_args,tool_result):
+        observe_result(event,getattr(tool,'name',''),tool_result)
 
     def prepare_performance_context(self,event,request,image_contract=False):
         settings=self.config.get('performance',{})
@@ -834,7 +892,7 @@ class PersonaModelBindings(Star):
                     return
             request.contexts=history
         event.set_extra('qq_performance',stats)
-        media_hint='旧图片可能被省略，若当前任务确实需要而没有看到原图，先按来源目录使用view_context_images；需要更早消息则用browse_group_history或read_group_message。确实无法恢复时再请对方引用或重发。' if event.get_extra('qq_attachment_snapshot') else '旧图片可能被省略，若当前任务确实需要而没有看到原图，请对方引用或重发。'
+        media_hint='先使用本轮近期视觉资料；缺少的历史图片按来源目录使用view_context_images，较早消息用browse_group_history或read_group_message。资料确实无法恢复时再说明具体缺失并澄清。' if event.get_extra('qq_attachment_snapshot') else '历史图片可能未附加；只能根据实际可用资料回答，缺失时说明具体原因并澄清。'
         request.system_prompt=(getattr(request,'system_prompt','') or '')+'\n[近期上下文与回忆]\n日常对话使用近期上下文。只有回答确实依赖用户以往的事实、偏好、约定，或用户明确要求回忆时，才在工具可用时调用 recall_long_term_memory；普通闲聊和信息完整的新任务无需先检索。查询无结果时不要编造记忆。'+media_hint+'\n'
         label='QQ上下文诊断' if event.get_extra('qq_diagnostic') or getattr(self,'cache_path',None) is None else 'QQ上下文优化'
         logger.info('[%s] group=%s before=%s after=%s old_images_removed=%s',label,event.get_group_id(),stats['before_messages'],stats['after_messages'],stats['removed_history_images'])
@@ -850,9 +908,10 @@ class PersonaModelBindings(Star):
             if activity:
                 activity.emit('sent',**event_trace(event),seconds=round(time.monotonic()-event.get_extra('qq_model_trace_started'),3),image_tool_calls=event.get_extra('qq_image_tools_started') or 0)
             scope=event.get_extra('qq_reply_scope')
-            if not scope or self.router.context(group).scope==scope:
-                self.router.note_ai(group,result.get_plain_text() or "[AI发送了图片或其他内容]", request=event.get_message_str(),sender=str(event.get_sender_id()),message_id=str(getattr(event.message_obj,'message_id','') or ''))
-                self.save_context()
+            self.router.note_ai(group,result.get_plain_text() or "[AI发送了图片或其他内容]", request=event.get_message_str(),sender=str(event.get_sender_id()),message_id=str(getattr(event.message_obj,'message_id','') or ''),scope=scope)
+            if event.get_extra('qq_task_incomplete'):
+                self.router.update_request(group,str(event.message_obj.message_id),scope=scope,status='incomplete')
+            self.save_context()
             owner=event.get_extra('qq_history_owner')
             store=getattr(self,'chat_history_store',None)
             if owner and store is not None and self.config.get('history_recall',{}).get('enabled',True) and not event.get_extra('qq_diagnostic'):
@@ -865,7 +924,9 @@ class PersonaModelBindings(Star):
 
     async def reply_status(self):
         from quart import jsonify
-        return jsonify({"status":"ok","data":{"settings":self.router.settings,"stats":dict(self.router.stats),"cached_groups":len(self.router.groups),"history_persistent":True,"history_recovery":"persona_scoped_native_history","mention_resume_window_seconds":300}})
+        from collections import Counter
+        tasks=[t for c in [*self.router.groups.values(),*self.router.scoped_groups.values()] for t in c.tasks.values()]
+        return jsonify({"status":"ok","data":{"settings":self.router.settings,"stats":dict(self.router.stats),"cached_groups":len(self.router.groups),"task_counts":dict(Counter(t['status'] for t in tasks)),"history_persistent":True,"history_recovery":"scoped_shared_observations","mention_resume":"model_resolves_from_shared_facts"}})
 
     async def model_activity_status(self):
         from quart import jsonify
@@ -1042,7 +1103,7 @@ class PersonaModelBindings(Star):
         # Meme Manager 5.x resolves native per-persona pack rules from this
         # request-scoped field; no legacy global MEMES_DIR switching is needed.
         event.set_extra("meme_manager_resolved_persona_id", persona)
-        provider_id = self.config.get("bindings", {}).get(persona)
+        provider_id = binding_map(self.config).get(persona)
         if provider_id and self.context.get_provider_by_id(provider_id) is not None:
             event.set_extra("selected_provider", provider_id)
             event.set_extra("selected_model", None)
@@ -1063,7 +1124,7 @@ class PersonaModelBindings(Star):
         from astrbot.core.astr_main_agent import _select_provider
         from astrbot.core.star.star_handler import star_handlers_registry, EventType
         results = []
-        for persona, expected in self.config.get("bindings", {}).items():
+        for persona, expected in binding_map(self.config).items():
             extras = {"user_policy_decision": SimpleNamespace(persona_id=persona)}
             event = SimpleNamespace(get_extra=lambda key: extras.get(key), set_extra=lambda key,value: extras.__setitem__(key,value))
             self.bind(event)
